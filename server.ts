@@ -11,11 +11,36 @@ import { createGroq } from "@ai-sdk/groq";
 import { generateText } from "ai";
 import twilio from "twilio";
 import dotenv from "dotenv";
+import ffmpeg from "fluent-ffmpeg";
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import { PassThrough } from "stream";
+
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+
+// Helper to convert WebM buffer to WAV buffer for strict APIs (like Sarvam)
+async function convertWebmToWav(buffer: Buffer): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const inputStream = new PassThrough();
+    inputStream.end(buffer);
+    
+    const outputStream = new PassThrough();
+    const chunks: Buffer[] = [];
+    
+    outputStream.on("data", (chunk: Buffer) => chunks.push(chunk));
+    outputStream.on("end", () => resolve(Buffer.concat(chunks)));
+    outputStream.on("error", reject);
+    
+    ffmpeg(inputStream)
+      .toFormat("wav")
+      .on("error", reject)
+      .pipe(outputStream);
+  });
+}
 
 // Helper for timeout-safe fetch
 async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 12000): Promise<Response> {
@@ -493,13 +518,16 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
     if (sarvamKey && sarvamKey !== "YOUR_SARVAM_API_KEY") {
       try {
         const formData = new FormData();
-        const audioBuffer = req.file.buffer;
-        const mime = req.file.mimetype || "audio/webm";
+        const rawAudioBuffer = req.file.buffer;
+        
+        // Convert WebM to WAV to satisfy Sarvam's strict file format requirements
+        const wavBuffer = await convertWebmToWav(rawAudioBuffer);
+        
         const fileObj = typeof File !== "undefined"
-          ? new File([audioBuffer], "voice.webm", { type: mime })
-          : new Blob([audioBuffer], { type: mime });
+          ? new File([wavBuffer], "voice.wav", { type: "audio/wav" })
+          : new Blob([wavBuffer], { type: "audio/wav" });
           
-        formData.append("file", fileObj as any, "voice.webm");
+        formData.append("file", fileObj as any, "voice.wav");
         if (targetLang !== "unknown") {
           formData.append("language_code", targetLang);
         }

@@ -49,6 +49,35 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const audioChunksRef = useRef<Blob[]>([]);
   const transcriptRef = useRef<string>('');
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const silenceTimerRef = useRef<any>(null);
+  const isListeningRef = useRef<boolean>(false);
+  const isSpeakingRef = useRef<boolean>(false);
+
+  const updateListeningState = (val: boolean) => {
+    isListeningRef.current = val;
+    setIsListening(val);
+  };
+
+  const updateSpeakingState = (val: boolean) => {
+    isSpeakingRef.current = val;
+    setIsSpeaking(val);
+  };
+
+  const stopSpeaking = () => {
+    if (activeAudioRef.current) {
+      try {
+        activeAudioRef.current.pause();
+        activeAudioRef.current.currentTime = 0;
+        activeAudioRef.current = null;
+      } catch {}
+    }
+    if (synthRef.current) {
+      try {
+        synthRef.current.cancel();
+      } catch {}
+    }
+    updateSpeakingState(false);
+  };
 
   // Auto-scroll chat stream to bottom whenever messages or loading state changes
   useEffect(() => {
@@ -181,7 +210,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         else recognition.lang = 'en-US';
 
         recognition.onstart = () => {
-          setIsListening(true);
+          updateListeningState(true);
           setMicError(null);
         };
 
@@ -194,6 +223,19 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           if (interimTranscript.trim()) {
             transcriptRef.current = interimTranscript;
             setTranscript(interimTranscript);
+
+            // User barge-in: If user speaks while AI audio is active, stop AI speech immediately
+            if (isSpeakingRef.current || activeAudioRef.current) {
+              stopSpeaking();
+            }
+
+            // Auto Silence Detection: After 1.5s of no new spoken words, automatically finish & send!
+            if (silenceTimerRef.current) {
+              clearTimeout(silenceTimerRef.current);
+            }
+            silenceTimerRef.current = setTimeout(() => {
+              stopListeningAndSend();
+            }, 1500);
           }
         };
 
@@ -202,16 +244,12 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           if (event.error === 'not-allowed') {
             setMicError("Microphone access blocked in browser. Please enable permissions.");
           }
-          // Do not kill isListening here; MediaRecorder will capture audio and pass to Sarvam/Groq STT!
         };
 
         recognition.onend = async () => {
-          // If native speech engine finishes naturally and captured words, handle it
           const capturedText = transcriptRef.current?.trim();
-          if (capturedText && isListening) {
-            setIsListening(false);
-            handleSendMessage(capturedText);
-            transcriptRef.current = '';
+          if (capturedText && isListeningRef.current) {
+            stopListeningAndSend();
           }
         };
 
@@ -236,31 +274,20 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       else if (language === 'Kannada') utterance.lang = 'kn-IN';
       else utterance.lang = 'en-US';
 
-      utterance.onstart = () => setIsSpeaking(true);
-      utterance.onend = () => setIsSpeaking(false);
-      utterance.onerror = () => setIsSpeaking(false);
+      utterance.onstart = () => updateSpeakingState(true);
+      utterance.onend = () => updateSpeakingState(false);
+      utterance.onerror = () => updateSpeakingState(false);
       synthRef.current.speak(utterance);
     } catch (e) {
       console.warn("Browser synthesis error:", e);
-      setIsSpeaking(false);
+      updateSpeakingState(false);
     }
   };
 
   const speak = async (text: string) => {
     if (!text) return;
 
-    // Stop current audio if playing
-    if (activeAudioRef.current) {
-      try {
-        activeAudioRef.current.pause();
-        activeAudioRef.current = null;
-      } catch {}
-    }
-    if (synthRef.current) {
-      try {
-        synthRef.current.cancel();
-      } catch {}
-    }
+    stopSpeaking();
 
     try {
       // 1. Generate natural speech using Sarvam AI TTS
@@ -275,10 +302,10 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         const data = await res.json();
         if (data && data.audioBase64) {
           const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
-          audio.onplay = () => setIsSpeaking(true);
-          audio.onended = () => setIsSpeaking(false);
+          audio.onplay = () => updateSpeakingState(true);
+          audio.onended = () => updateSpeakingState(false);
           audio.onerror = () => {
-            setIsSpeaking(false);
+            updateSpeakingState(false);
             fallbackBrowserSpeak(text);
           };
           activeAudioRef.current = audio;
@@ -294,42 +321,72 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     fallbackBrowserSpeak(text);
   };
 
-  const toggleListening = async () => {
-    if (isListening) {
-      setIsListening(false);
-      try {
-        recognitionRef.current?.stop();
-      } catch (e) {
-        console.warn(e);
-      }
+  const stopListeningAndSend = async () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    updateListeningState(false);
 
-      const captured = transcriptRef.current.trim();
-      if (captured && !isHallucinatedText(captured)) {
-        handleSendMessage(captured);
-        transcriptRef.current = '';
-      } else {
-        // Fall back immediately to backend STT (Sarvam AI Saaras v3 + Groq Whisper)
-        setIsLoading(true);
-        const serverText = await stopAndTranscribeAudio();
-        setIsLoading(false);
-        if (serverText && serverText.trim() && !isHallucinatedText(serverText)) {
-          setTranscript(serverText.trim());
-          handleSendMessage(serverText.trim());
-        } else {
-          setMicError("No speech detected. Please speak clearly into your microphone or type your question below.");
-        }
-      }
-    } else {
-      setTranscript('');
+    try {
+      recognitionRef.current?.stop();
+    } catch (e) {
+      console.warn(e);
+    }
+
+    const captured = transcriptRef.current.trim();
+    if (captured && !isHallucinatedText(captured)) {
       transcriptRef.current = '';
-      setIsListening(true);
-      await startRecording();
-      try {
-        recognitionRef.current?.start();
-      } catch (e) {
-        console.warn("Native recognition start notice (falling back cleanly to audio recorder):", e);
+      setTranscript('');
+      handleSendMessage(captured);
+    } else {
+      // Fall back immediately to backend STT (Sarvam AI Saaras v4 + Groq Whisper)
+      setIsLoading(true);
+      const serverText = await stopAndTranscribeAudio();
+      setIsLoading(false);
+      if (serverText && serverText.trim() && !isHallucinatedText(serverText)) {
+        setTranscript(serverText.trim());
+        transcriptRef.current = '';
+        handleSendMessage(serverText.trim());
+      } else {
+        setTranscript('');
+        transcriptRef.current = '';
       }
     }
+  };
+
+  const startListeningProcess = async () => {
+    stopSpeaking();
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    setTranscript('');
+    transcriptRef.current = '';
+    updateListeningState(true);
+    await startRecording();
+    try {
+      recognitionRef.current?.start();
+    } catch (e) {
+      console.warn("Native recognition start notice (falling back cleanly to audio recorder):", e);
+    }
+  };
+
+  const toggleListening = async () => {
+    // 1. If AI is speaking -> INTERRUPT! Stop speech immediately and start listening to user
+    if (isSpeakingRef.current || isSpeaking || activeAudioRef.current) {
+      await startListeningProcess();
+      return;
+    }
+
+    // 2. If listening -> User clicked mic again to stop! Stop listening & send immediately
+    if (isListeningRef.current || isListening) {
+      await stopListeningAndSend();
+      return;
+    }
+
+    // 3. Otherwise -> Start listening
+    await startListeningProcess();
   };
 
   const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {

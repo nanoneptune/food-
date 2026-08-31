@@ -81,14 +81,6 @@ export default function Admin() {
   if (!isAuthenticated) {
     return (
       <div className="space-y-4">
-        <div className="px-6">
-          <Link 
-            to="/" 
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-slate-900"
-          >
-            <ArrowLeft size={14} /> Back to Assistant
-          </Link>
-        </div>
         <PINPad onVerify={() => setIsAuthenticated(true)} />
       </div>
     );
