@@ -1,0 +1,39 @@
+{
+  "entities": {
+    "Complaint": {
+      "title": "Complaint",
+      "description": "A user-raised complaint.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Customer name" },
+        "phoneNumber": { "type": "string", "description": "Customer contact number" },
+        "query": { "type": "string", "description": "The complaint details" },
+        "status": { "type": "string", "enum": ["pending", "resolved"], "description": "Current status" },
+        "createdAt": { "type": "number", "description": "Creation timestamp" }
+      },
+      "required": ["name", "phoneNumber", "query", "status", "createdAt"]
+    },
+    "KnowledgeBase": {
+      "title": "Knowledge Base Entry",
+      "description": "Information used by the AI to answer queries.",
+      "type": "object",
+      "properties": {
+        "content": { "type": "string", "description": "Text content" },
+        "sourceName": { "type": "string", "description": "Filename or title" },
+        "type": { "type": "string", "enum": ["text", "pdf", "image"], "description": "Source type" },
+        "createdAt": { "type": "number", "description": "Upload timestamp" }
+      },
+      "required": ["content", "sourceName", "type", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/complaints/{complaintId}": {
+      "schema": "Complaint",
+      "description": "Collection of user complaints"
+    },
+    "/knowledge_base/{entryId}": {
+      "schema": "KnowledgeBase",
+      "description": "Collection of knowledge base documents"
+    }
+  }
+}
