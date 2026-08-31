@@ -15,7 +15,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Lazy initialization for Gemini AI SDK
 let geminiClient: GoogleGenAI | null = null;
