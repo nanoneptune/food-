@@ -178,65 +178,13 @@ export default function ParticleBall({
         voiceEnergy = 0.35 + Math.sin(time * 4) * 0.25;
       }
 
-      // Smooth rotation velocity
-      const rotationSpeed = isListening || isSpeaking ? 0.02 + voiceEnergy * 0.018 : 0.009;
-      rotY += rotationSpeed;
-      rotX = Math.sin(time * 0.6) * 0.28;
-
-      // Draw background ambient spherical glow
-      const glowRadius = (baseSphereRadius + 24) * (1 + voiceEnergy * 0.4);
-      const gradient = ctx.createRadialGradient(
-        centerX,
-        centerY,
-        10,
-        centerX,
-        centerY,
-        glowRadius + 45
-      );
-
-      if (isListening) {
-        gradient.addColorStop(0, 'rgba(99, 102, 241, 0.45)');
-        gradient.addColorStop(0.4, 'rgba(129, 140, 248, 0.25)');
-        gradient.addColorStop(0.8, 'rgba(99, 102, 241, 0.08)');
-        gradient.addColorStop(1, 'rgba(99, 102, 241, 0)');
-      } else if (isSpeaking) {
-        gradient.addColorStop(0, 'rgba(168, 85, 247, 0.5)');
-        gradient.addColorStop(0.4, 'rgba(236, 72, 153, 0.25)');
-        gradient.addColorStop(0.8, 'rgba(147, 51, 234, 0.08)');
-        gradient.addColorStop(1, 'rgba(147, 51, 234, 0)');
-      } else {
-        gradient.addColorStop(0, 'rgba(99, 102, 241, 0.18)');
-        gradient.addColorStop(0.5, 'rgba(129, 140, 248, 0.06)');
-        gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      // Rotation velocity: at rest when stopped/idle, starts rotating and interacting when tapped / active
+      let rotationSpeed = 0;
+      if (isListening || isSpeaking || isLoading) {
+        rotationSpeed = 0.018 + voiceEnergy * 0.022;
+        rotY += rotationSpeed;
+        rotX = Math.sin(time * 0.8) * 0.22;
       }
-
-      ctx.fillStyle = gradient;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, glowRadius + 45, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Dense glowing core in the center of the sphere
-      const corePulse = (baseSphereRadius * 0.35) * (1 + (isListening || isSpeaking ? voiceEnergy * 0.5 : Math.sin(time * 2) * 0.08));
-      const coreGrad = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, corePulse);
-      if (isListening) {
-        coreGrad.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
-        coreGrad.addColorStop(0.3, 'rgba(165, 180, 252, 0.7)');
-        coreGrad.addColorStop(0.8, 'rgba(79, 70, 229, 0.2)');
-        coreGrad.addColorStop(1, 'rgba(79, 70, 229, 0)');
-      } else if (isSpeaking) {
-        coreGrad.addColorStop(0, 'rgba(255, 255, 255, 0.95)');
-        coreGrad.addColorStop(0.3, 'rgba(244, 114, 182, 0.7)');
-        coreGrad.addColorStop(0.8, 'rgba(168, 85, 247, 0.2)');
-        coreGrad.addColorStop(1, 'rgba(168, 85, 247, 0)');
-      } else {
-        coreGrad.addColorStop(0, 'rgba(199, 210, 254, 0.6)');
-        coreGrad.addColorStop(0.5, 'rgba(99, 102, 241, 0.15)');
-        coreGrad.addColorStop(1, 'rgba(99, 102, 241, 0)');
-      }
-      ctx.fillStyle = coreGrad;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, corePulse, 0, Math.PI * 2);
-      ctx.fill();
 
       // Transform and project particles in 3D
       const projectedParticles: {
@@ -248,16 +196,19 @@ export default function ParticleBall({
         color: string;
       }[] = [];
 
+      const isActive = isListening || isSpeaking || isLoading;
+
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
 
-        // Harmonic wave displacement equation
+        // Harmonic wave displacement equation - only active when listening/speaking/loading
         const waveFreq = isListening || isSpeaking ? 4.5 : 2.5;
         const waveSpeed = isListening || isSpeaking ? 4.2 : 1.6;
-        const waveAmp = (5 + voiceEnergy * 36);
+        const waveAmp = isActive ? (3 + voiceEnergy * 32) : 0;
 
-        const wave = Math.sin(p.theta * waveFreq + time * waveSpeed + p.waveOffset) *
-                     Math.cos(p.phi * waveFreq - time * waveSpeed * 0.75);
+        const wave = isActive 
+          ? Math.sin(p.theta * waveFreq + time * waveSpeed + p.waveOffset) * Math.cos(p.phi * waveFreq - time * waveSpeed * 0.75)
+          : 0;
 
         const currentRadius = p.orbitRadius + wave * waveAmp;
 
@@ -280,9 +231,9 @@ export default function ParticleBall({
         const y2d = centerY + y2 * scale;
 
         // Depth-based opacity & size
-        const depthAlpha = Math.max(0.18, Math.min(1, (z2 + baseSphereRadius + 45) / (baseSphereRadius * 2 + 45)));
-        const finalAlpha = depthAlpha * (0.6 + voiceEnergy * 0.4);
-        const finalSize = Math.max(1.1, p.radius * scale * (1 + voiceEnergy * 0.45));
+        const depthAlpha = Math.max(0.2, Math.min(1, (z2 + baseSphereRadius + 45) / (baseSphereRadius * 2 + 45)));
+        const finalAlpha = depthAlpha * (isActive ? (0.65 + voiceEnergy * 0.35) : 0.75);
+        const finalSize = Math.max(1.1, p.radius * scale * (isActive ? (1 + voiceEnergy * 0.4) : 1));
 
         projectedParticles.push({
           x2d,
@@ -297,11 +248,11 @@ export default function ParticleBall({
       // Sort by Z for realistic depth layering
       projectedParticles.sort((a, b) => a.z - b.z);
 
-      // Draw connecting energy wave lines between close neighbouring particles
-      ctx.lineWidth = 0.8;
-      const maxConnectDist = 34 * (1 + voiceEnergy * 0.45);
+      // Draw subtle connecting energy wave lines between close neighbouring particles
+      ctx.lineWidth = 0.75;
+      const maxConnectDist = (isActive ? 32 * (1 + voiceEnergy * 0.4) : 26);
       for (let i = 0; i < projectedParticles.length; i += 2) {
-        for (let j = i + 1; j < Math.min(i + 9, projectedParticles.length); j++) {
+        for (let j = i + 1; j < Math.min(i + 8, projectedParticles.length); j++) {
           const p1 = projectedParticles[i];
           const p2 = projectedParticles[j];
           const dx = p1.x2d - p2.x2d;
@@ -309,7 +260,7 @@ export default function ParticleBall({
           const dist = Math.sqrt(dx * dx + dy * dy);
 
           if (dist < maxConnectDist) {
-            const lineAlpha = (1 - dist / maxConnectDist) * 0.28 * Math.min(p1.alpha, p2.alpha);
+            const lineAlpha = (1 - dist / maxConnectDist) * 0.24 * Math.min(p1.alpha, p2.alpha);
             if (isSpeaking) {
               ctx.strokeStyle = `rgba(216, 180, 254, ${lineAlpha})`;
             } else {
@@ -323,7 +274,7 @@ export default function ParticleBall({
         }
       }
 
-      // Render individual 3D glowing particles
+      // Render individual 3D particles
       for (let i = 0; i < projectedParticles.length; i++) {
         const p = projectedParticles[i];
         ctx.fillStyle = `${p.color}${p.alpha})`;
@@ -331,9 +282,9 @@ export default function ParticleBall({
         ctx.arc(p.x2d, p.y2d, p.radius, 0, Math.PI * 2);
         ctx.fill();
 
-        // Specular glint on frontal active particles
-        if (p.z > 15 && (isListening || isSpeaking || p.radius > 2.5)) {
-          ctx.fillStyle = `rgba(255, 255, 255, ${p.alpha * 0.75})`;
+        // Subtle specular highlight on frontal particles
+        if (p.z > 15) {
+          ctx.fillStyle = `rgba(255, 255, 255, ${p.alpha * 0.7})`;
           ctx.beginPath();
           ctx.arc(p.x2d - p.radius * 0.25, p.y2d - p.radius * 0.25, p.radius * 0.35, 0, Math.PI * 2);
           ctx.fill();
@@ -355,29 +306,17 @@ export default function ParticleBall({
   return (
     <motion.div
       onClick={onClick}
-      whileHover={{ scale: 1.05 }}
-      whileTap={{ scale: 0.95 }}
+      whileHover={{ scale: 1.04 }}
+      whileTap={{ scale: 0.96 }}
       className="relative flex items-center justify-center cursor-pointer select-none group"
       title={isListening ? 'Tap sphere to stop listening' : 'Tap sphere to talk'}
     >
-      {/* 3D Wave Particle Canvas Sphere */}
+      {/* Pure 3D Particle Canvas Sphere - No extra outer rings/light disks */}
       <canvas
         ref={canvasRef}
-        className="w-[300px] h-[300px] sm:w-[340px] sm:h-[340px] drop-shadow-2xl transition-transform duration-300"
+        className="w-[280px] h-[280px] sm:w-[320px] sm:h-[320px] transition-transform duration-300"
         style={{ touchAction: 'none' }}
       />
-
-      {/* Ripple halo ring when active */}
-      {(isListening || isSpeaking) && (
-        <motion.div
-          initial={{ scale: 0.8, opacity: 0.7 }}
-          animate={{ scale: 1.45, opacity: 0 }}
-          transition={{ repeat: Infinity, duration: 1.8, ease: 'easeOut' }}
-          className={`absolute inset-0 rounded-full border-2 pointer-events-none ${
-            isSpeaking ? 'border-purple-400' : 'border-indigo-400'
-          }`}
-        />
-      )}
     </motion.div>
   );
 }
