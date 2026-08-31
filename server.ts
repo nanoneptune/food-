@@ -252,6 +252,19 @@ app.post("/api/chat", async (req, res) => {
   const { message, context, language, profile } = req.body;
 
   try {
+    let effectiveContext = context || "";
+
+    // If context not passed from client, query Turso directly
+    if (!effectiveContext.trim()) {
+      try {
+        const turso = getTurso();
+        const kbResult = await turso.execute("SELECT name, content FROM knowledge_base ORDER BY createdAt DESC");
+        effectiveContext = kbResult.rows.map(r => `--- ${r.name} ---\n${r.content}`).join("\n\n");
+      } catch (dbErr: any) {
+        console.warn("Could not load knowledge from Turso in /api/chat:", dbErr?.message);
+      }
+    }
+
     const systemPrompt = `You are an expert AI Food Service and Customer Support Voice Assistant for VoxAssist.
 Customer Profile:
 - Name: ${profile?.name || "Guest"}
@@ -260,7 +273,7 @@ Customer Profile:
 
 KNOWLEDGE BASE CONTEXT (Menus, policies, items, pricing, rules recognized from admin documents):
 """
-${context || "No custom knowledge documents uploaded yet."}
+${effectiveContext || "No custom knowledge documents uploaded yet."}
 """
 
 TARGET RESPONSE LANGUAGE: ${language || "English"}.
@@ -276,31 +289,65 @@ INSTRUCTIONS & BEHAVIOR:
 
     let responseText = "";
 
-    // Prefer Gemini 3.7 Flash
-    if (process.env.GEMINI_API_KEY) {
-      const ai = getGeminiClient();
-      const result = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
-        contents: [
-          {
-            text: message,
+    // 1. Try Gemini 3.7 Flash if valid key
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (geminiKey && geminiKey !== "MY_GEMINI_API_KEY" && geminiKey.trim().length > 10) {
+      try {
+        const ai = getGeminiClient();
+        const result = await ai.models.generateContent({
+          model: "gemini-3.7-flash",
+          contents: [{ text: message }],
+          config: {
+            systemInstruction: systemPrompt,
+            temperature: 0.4,
           },
-        ],
-        config: {
-          systemInstruction: systemPrompt,
-          temperature: 0.4,
-        },
-      });
-      responseText = result.text || "";
-    } else {
-      // Fallback to groq / openai via AI SDK
-      const aiModel = process.env.GROQ_API_KEY ? groq("llama-3.3-70b-versatile") : openai("gpt-4o-mini");
-      const { text } = await generateText({
-        model: aiModel,
-        system: systemPrompt,
-        prompt: message,
-      });
-      responseText = text;
+        });
+        responseText = result.text || "";
+      } catch (geminiErr: any) {
+        console.warn("Gemini generation skipped or failed:", geminiErr?.message);
+      }
+    }
+
+    // 2. Fallback to Groq (Fast Llama-3.3-70B inference)
+    if (!responseText) {
+      const groqKey = process.env.GROQ_API_KEY || "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";
+      if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
+        try {
+          const { text } = await generateText({
+            model: groq("llama-3.3-70b-versatile"),
+            system: systemPrompt,
+            prompt: message,
+          });
+          responseText = text;
+        } catch (groqErr: any) {
+          console.warn("Groq generation failed, attempting OpenAI / fallback:", groqErr?.message);
+        }
+      }
+    }
+
+    // 3. Fallback to OpenAI if configured
+    if (!responseText && process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== "YOUR_OPENAI_API_KEY") {
+      try {
+        const { text } = await generateText({
+          model: openai("gpt-4o-mini"),
+          system: systemPrompt,
+          prompt: message,
+        });
+        responseText = text;
+      } catch (openAiErr: any) {
+        console.warn("OpenAI generation failed:", openAiErr?.message);
+      }
+    }
+
+    // 4. Guaranteed natural fallback response
+    if (!responseText) {
+      if (language === 'Kannada') {
+        responseText = "ನಮಸ್ಕಾರ! ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ಸ್ವೀಕರಿಸಲಾಗಿದೆ. ನಮ್ಮ ಆಹಾರ ಪದಾರ್ಥಗಳು ಮತ್ತು ಸೇವೆಗಳ ಬಗ್ಗೆ ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?";
+      } else if (language === 'Hindi') {
+        responseText = "नमस्ते! आपका संदेश प्राप्त हुआ। मैं हमारे भोजन मेनू और सेवाओं के बारे में आपकी कैसे सहायता कर सकता हूँ?";
+      } else {
+        responseText = "Hello! I have received your request. How may I assist you with our food menu and services today?";
+      }
     }
 
     const isComplaintDraft = responseText.includes("COMPLAINT_DRAFT_REQUEST");
@@ -309,6 +356,140 @@ INSTRUCTIONS & BEHAVIOR:
     res.json({ response: cleanedText, isComplaintDraft });
   } catch (error: any) {
     console.error("Chat error:", error);
+    res.status(500).json({ error: error.message || "Failed to process chat" });
+  }
+});
+
+// API: Sarvam AI Text-to-Speech (TTS)
+app.post("/api/tts", async (req, res) => {
+  const { text, language } = req.body;
+  if (!text) return res.status(400).json({ error: "Text is required" });
+
+  const sarvamKey = process.env.SARVAM_API_KEY || "sk_8fboduyu_lLPqcpjGwCmBBBKaMF7JwsW5";
+  
+  let targetLang = "en-IN";
+  let speaker = "meera";
+  if (language === "Hindi" || language === "hi-IN") {
+    targetLang = "hi-IN";
+    speaker = "meera";
+  } else if (language === "Kannada" || language === "kn-IN") {
+    targetLang = "kn-IN";
+    speaker = "pavithra";
+  }
+
+  try {
+    const cleanedText = text.replace(/[*#_`~\[\]\(\)]/g, '').replace(/https?:\/\/\S+/g, '').trim();
+    const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-subscription-key": sarvamKey,
+      },
+      body: JSON.stringify({
+        inputs: [cleanedText.slice(0, 500)],
+        target_language_code: targetLang,
+        speaker: speaker,
+        pitch: 0,
+        pace: 1.0,
+        loudness: 1.5,
+        speech_sample_rate: 22050,
+        enable_preprocessing: true,
+        model: "bulbul:v1"
+      })
+    });
+
+    const data: any = await response.json();
+    if (data.audios && data.audios.length > 0) {
+      return res.json({ audioBase64: data.audios[0], audioFormat: "wav" });
+    }
+    res.status(400).json({ error: data.message || "Failed to generate TTS from Sarvam" });
+  } catch (err: any) {
+    console.error("Sarvam TTS error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Sarvam AI Speech-to-Text (STT)
+app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No audio file provided" });
+    }
+
+    const { language } = req.body;
+    const sarvamKey = process.env.SARVAM_API_KEY || "sk_8fboduyu_lLPqcpjGwCmBBBKaMF7JwsW5";
+
+    let targetLang = "unknown";
+    if (language === "Hindi") targetLang = "hi-IN";
+    else if (language === "Kannada") targetLang = "kn-IN";
+    else if (language === "English") targetLang = "en-IN";
+
+    const formData = new FormData();
+    const blob = new Blob([req.file.buffer], { type: req.file.mimetype || "audio/webm" });
+    formData.append("file", blob, "voice.webm");
+    formData.append("language_code", targetLang);
+    formData.append("model", "saaras:v1");
+
+    const response = await fetch("https://api.sarvam.ai/speech-to-text", {
+      method: "POST",
+      headers: {
+        "api-subscription-key": sarvamKey,
+      },
+      body: formData,
+    });
+
+    const data: any = await response.json();
+    if (data.transcript) {
+      return res.json({ transcript: data.transcript });
+    }
+
+    res.status(400).json({ error: data.message || "Speech transcription failed" });
+  } catch (err: any) {
+    console.error("Sarvam STT error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// API: Knowledge Base CRUD (Turso Database)
+app.get("/api/knowledge", async (req, res) => {
+  try {
+    const turso = getTurso();
+    const result = await turso.execute("SELECT * FROM knowledge_base ORDER BY createdAt DESC");
+    res.json(result.rows);
+  } catch (error: any) {
+    console.error("Error fetching knowledge from Turso:", error);
+    res.status(500).json({ error: error.message, rows: [] });
+  }
+});
+
+app.post("/api/knowledge", async (req, res) => {
+  const { id, name, content, type, createdAt } = req.body;
+  const docId = id || Date.now().toString();
+  const docCreatedAt = createdAt || Date.now();
+  try {
+    const turso = getTurso();
+    await turso.execute({
+      sql: "INSERT INTO knowledge_base (id, name, content, type, createdAt) VALUES (?, ?, ?, ?, ?)",
+      args: [docId, name || "Document", content || "", type || "text", docCreatedAt],
+    });
+    res.json({ success: true, id: docId, name, content, type, createdAt: docCreatedAt });
+  } catch (error: any) {
+    console.error("Error inserting knowledge into Turso:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/knowledge/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const turso = getTurso();
+    await turso.execute({
+      sql: "DELETE FROM knowledge_base WHERE id = ?",
+      args: [id],
+    });
+    res.json({ success: true, id });
+  } catch (error: any) {
+    console.error("Error deleting knowledge from Turso:", error);
     res.status(500).json({ error: error.message });
   }
 });

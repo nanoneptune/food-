@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { db } from '../lib/firebase';
-import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy } from 'firebase/firestore';
 import { 
   Upload, Trash2, Loader2, Database, Search, FileText, Image as ImageIcon, 
   Eye, Copy, Check, Plus, AlertCircle, Sparkles, X, BookOpen, RefreshCw,
@@ -32,6 +30,7 @@ export default function UploadData() {
   const [manualTitle, setManualTitle] = useState('');
   const [manualContent, setManualContent] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+  const [isLoadingDocs, setIsLoadingDocs] = useState(false);
 
   // AI Erase State
   const [isAiEraseOpen, setIsAiEraseOpen] = useState(false);
@@ -43,13 +42,23 @@ export default function UploadData() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const fetchKnowledge = async () => {
+    setIsLoadingDocs(true);
+    try {
+      const res = await fetch('/api/knowledge');
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setFiles(data);
+      }
+    } catch (err: any) {
+      console.error('Error fetching knowledge from Turso:', err);
+    } finally {
+      setIsLoadingDocs(false);
+    }
+  };
+
   useEffect(() => {
-    const q = query(collection(db, 'knowledge_base'), orderBy('createdAt', 'desc'));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as KBDocument[];
-      setFiles(data);
-    });
-    return () => unsubscribe();
+    fetchKnowledge();
   }, []);
 
   const processFile = async (file: File) => {
@@ -77,16 +86,24 @@ export default function UploadData() {
         throw new Error(data.error || 'Failed to process document');
       }
 
-      setUploadStatus('Saving recognized knowledge to database...');
+      setUploadStatus('Saving recognized knowledge to Turso database...');
 
       const detectedType = isPdf ? 'pdf' : isImage ? 'image' : 'text';
+      const docId = Date.now().toString();
 
-      await addDoc(collection(db, 'knowledge_base'), {
-        name: data.sourceName || file.name,
-        content: data.content,
-        type: detectedType,
-        createdAt: Date.now(),
+      await fetch('/api/knowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: docId,
+          name: data.sourceName || file.name,
+          content: data.content,
+          type: detectedType,
+          createdAt: Date.now(),
+        }),
       });
+
+      await fetchKnowledge();
 
       setSuccessToast(`Successfully uploaded and recognized "${data.sourceName || file.name}"`);
       setTimeout(() => setSuccessToast(null), 3500);
@@ -118,16 +135,24 @@ export default function UploadData() {
     if (!manualTitle.trim() || !manualContent.trim()) return;
 
     try {
-      await addDoc(collection(db, 'knowledge_base'), {
-        name: manualTitle.trim(),
-        content: manualContent.trim(),
-        type: 'text',
-        createdAt: Date.now(),
+      const docId = Date.now().toString();
+      await fetch('/api/knowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: docId,
+          name: manualTitle.trim(),
+          content: manualContent.trim(),
+          type: 'text',
+          createdAt: Date.now(),
+        }),
       });
+
+      await fetchKnowledge();
       setManualTitle('');
       setManualContent('');
       setIsAddingManual(false);
-      setSuccessToast(`Added "${manualTitle.trim()}" to knowledge base.`);
+      setSuccessToast(`Added "${manualTitle.trim()}" to Turso knowledge base.`);
       setTimeout(() => setSuccessToast(null), 3500);
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to add manual knowledge');
@@ -136,18 +161,13 @@ export default function UploadData() {
 
   const deleteDocument = async (id: string) => {
     try {
-      await deleteDoc(doc(db, 'knowledge_base', id));
-      // Sync Turso
-      fetch('/api/knowledge/batch-delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: [id] }),
-      }).catch(() => {});
+      await fetch(`/api/knowledge/${id}`, { method: 'DELETE' });
 
       if (selectedDoc?.id === id) {
         setSelectedDoc(null);
       }
-      setSuccessToast('Document deleted successfully.');
+      setFiles(prev => prev.filter(f => f.id !== id));
+      setSuccessToast('Document deleted successfully from Turso.');
       setTimeout(() => setSuccessToast(null), 3000);
     } catch (err) {
       console.error('Delete error', err);
@@ -207,18 +227,14 @@ export default function UploadData() {
     if (selectedForErase.length === 0) return;
     setIsDeletingBatch(true);
     try {
-      // 1. Delete from Firestore in parallel
-      await Promise.all(
-        selectedForErase.map(id => deleteDoc(doc(db, 'knowledge_base', id)))
-      );
-
-      // 2. Sync deletion to Turso
+      // Sync deletion to Turso
       await fetch('/api/knowledge/batch-delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ids: selectedForErase }),
       });
 
+      setFiles(prev => prev.filter(f => !selectedForErase.includes(f.id)));
       setSuccessToast(`AI successfully removed ${selectedForErase.length} document(s) from database.`);
       setTimeout(() => setSuccessToast(null), 4000);
       setIsAiEraseOpen(false);

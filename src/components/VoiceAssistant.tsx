@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { db } from '../lib/firebase';
-import { collection, addDoc, getDocs } from 'firebase/firestore';
 import { Mic, MicOff, Send, AlertCircle, Loader2, Languages, Utensils, Upload, X, Volume2, Sparkles } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { VoiceInteraction, UserProfile } from '../types';
@@ -25,6 +23,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const transcriptRef = useRef<string>('');
+  const activeAudioRef = useRef<HTMLAudioElement | null>(null);
 
   const startRecording = async () => {
     try {
@@ -41,6 +40,40 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       console.warn("Microphone media recorder error:", e);
       setMicError("Microphone permission was denied. You can also type your message below.");
     }
+  };
+
+  const stopAndTranscribeAudio = async (): Promise<string | null> => {
+    return new Promise((resolve) => {
+      if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
+        return resolve(null);
+      }
+      mediaRecorderRef.current.onstop = async () => {
+        if (audioChunksRef.current.length === 0) return resolve(null);
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'speech.webm');
+        formData.append('language', language);
+
+        try {
+          const res = await fetch('/api/stt', { method: 'POST', body: formData });
+          const data = await res.json();
+          if (res.ok && data.transcript) {
+            resolve(data.transcript);
+          } else {
+            resolve(null);
+          }
+        } catch (e) {
+          console.warn("Sarvam STT error:", e);
+          resolve(null);
+        }
+      };
+
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        resolve(null);
+      }
+    });
   };
 
   const stopAndUploadAudio = async (): Promise<string | undefined> => {
@@ -73,110 +106,138 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   // Re-configure speech recognition whenever language changes
   useEffect(() => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setMicError("Speech recognition is not supported in this browser. Please use Google Chrome or Edge, or type your query below.");
-      return;
-    }
 
     try {
       if (recognitionRef.current) {
         recognitionRef.current.abort();
       }
 
-      const recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = true;
-      
-      // Assign language code
-      if (language === 'Hindi') recognition.lang = 'hi-IN';
-      else if (language === 'Kannada') recognition.lang = 'kn-IN';
-      else recognition.lang = 'en-US';
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = false;
+        recognition.interimResults = true;
+        
+        // Assign language code
+        if (language === 'Hindi') recognition.lang = 'hi-IN';
+        else if (language === 'Kannada') recognition.lang = 'kn-IN';
+        else recognition.lang = 'en-US';
 
-      recognition.onstart = () => {
-        setIsListening(true);
-        setMicError(null);
-      };
+        recognition.onstart = () => {
+          setIsListening(true);
+          setMicError(null);
+        };
 
-      recognition.onresult = (event: any) => {
-        let interimTranscript = '';
-        for (let i = event.resultIndex; i < event.results.length; i++) {
-          const piece = event.results[i][0].transcript;
-          interimTranscript += piece;
-        }
-        transcriptRef.current = interimTranscript;
-        setTranscript(interimTranscript);
-      };
+        recognition.onresult = (event: any) => {
+          let interimTranscript = '';
+          for (let i = event.resultIndex; i < event.results.length; i++) {
+            const piece = event.results[i][0].transcript;
+            interimTranscript += piece;
+          }
+          transcriptRef.current = interimTranscript;
+          setTranscript(interimTranscript);
+        };
 
-      recognition.onerror = (event: any) => {
-        console.warn('Speech recognition error event:', event.error);
-        if (event.error === 'not-allowed') {
-          setMicError("Microphone access was blocked. Please enable microphone permissions in your browser bar.");
-        }
-        setIsListening(false);
-      };
+        recognition.onerror = (event: any) => {
+          console.warn('Speech recognition error event:', event.error);
+          if (event.error === 'not-allowed') {
+            setMicError("Microphone access was blocked. Please enable microphone permissions in your browser bar.");
+          }
+          setIsListening(false);
+        };
 
-      recognition.onend = () => {
-        setIsListening(false);
-        const capturedText = transcriptRef.current?.trim();
-        if (capturedText) {
-          handleSendMessage(capturedText);
-          transcriptRef.current = '';
-        }
-      };
+        recognition.onend = async () => {
+          setIsListening(false);
+          const capturedText = transcriptRef.current?.trim();
+          if (capturedText) {
+            handleSendMessage(capturedText);
+            transcriptRef.current = '';
+          } else {
+            // Use Sarvam AI STT if browser speech recognition failed to capture
+            const sarvamTranscript = await stopAndTranscribeAudio();
+            if (sarvamTranscript && sarvamTranscript.trim()) {
+              setTranscript(sarvamTranscript.trim());
+              handleSendMessage(sarvamTranscript.trim());
+            }
+          }
+        };
 
-      recognitionRef.current = recognition;
+        recognitionRef.current = recognition;
+      }
     } catch (err) {
       console.warn("Speech recognition initialization error", err);
     }
   }, [language]);
 
-  const speak = (text: string) => {
+  const fallbackBrowserSpeak = (text: string) => {
     if (!synthRef.current || !text) return;
     try {
-      synthRef.current.cancel(); // Cancel any ongoing speech
-      
-      // Clean up markdown markers or code brackets before speaking out loud
+      synthRef.current.cancel();
       const cleanedForSpeech = text
         .replace(/[*#_`~\[\]\(\)]/g, '')
         .replace(/https?:\/\/\S+/g, '')
         .trim();
 
       const utterance = new SpeechSynthesisUtterance(cleanedForSpeech);
-      
-      if (language === 'Hindi') {
-        utterance.lang = 'hi-IN';
-      } else if (language === 'Kannada') {
-        utterance.lang = 'kn-IN';
-      } else {
-        utterance.lang = 'en-US';
-      }
-
-      // Try selecting a natural voice matching the locale
-      const voices = synthRef.current.getVoices();
-      if (voices && voices.length > 0) {
-        const targetLocale = language === 'Hindi' ? 'hi' : language === 'Kannada' ? 'kn' : 'en';
-        const matchedVoice = voices.find(v => v.lang.toLowerCase().startsWith(targetLocale));
-        if (matchedVoice) utterance.voice = matchedVoice;
-      }
-      
-      utterance.rate = 1.0;
-      utterance.pitch = 1.0;
+      if (language === 'Hindi') utterance.lang = 'hi-IN';
+      else if (language === 'Kannada') utterance.lang = 'kn-IN';
+      else utterance.lang = 'en-US';
 
       utterance.onstart = () => setIsSpeaking(true);
       utterance.onend = () => setIsSpeaking(false);
-      utterance.onerror = (e) => {
-        console.warn("Speech synthesis error", e);
-        setIsSpeaking(false);
-      };
-
+      utterance.onerror = () => setIsSpeaking(false);
       synthRef.current.speak(utterance);
     } catch (e) {
-      console.warn("Speech synthesis trigger error", e);
+      console.warn("Browser synthesis error:", e);
       setIsSpeaking(false);
     }
   };
 
-  const toggleListening = () => {
+  const speak = async (text: string) => {
+    if (!text) return;
+
+    // Stop current audio if playing
+    if (activeAudioRef.current) {
+      try {
+        activeAudioRef.current.pause();
+        activeAudioRef.current = null;
+      } catch {}
+    }
+    if (synthRef.current) {
+      try {
+        synthRef.current.cancel();
+      } catch {}
+    }
+
+    try {
+      // 1. Generate natural speech using Sarvam AI TTS
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, language })
+      });
+
+      const data = await res.json();
+      if (res.ok && data.audioBase64) {
+        const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
+        audio.onplay = () => setIsSpeaking(true);
+        audio.onended = () => setIsSpeaking(false);
+        audio.onerror = () => {
+          setIsSpeaking(false);
+          fallbackBrowserSpeak(text);
+        };
+        activeAudioRef.current = audio;
+        await audio.play();
+        return;
+      }
+    } catch (err) {
+      console.warn("Sarvam TTS request failed, using browser speech:", err);
+    }
+
+    // 2. Fallback to browser SpeechSynthesis
+    fallbackBrowserSpeak(text);
+  };
+
+  const toggleListening = async () => {
     if (isListening) {
       try {
         recognitionRef.current?.stop();
@@ -184,6 +245,17 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         console.warn(e);
       }
       setIsListening(false);
+
+      // If recognition didn't auto-handle onend, ensure Sarvam STT gets transcribed
+      setTimeout(async () => {
+        if (!transcriptRef.current.trim()) {
+          const sarvamText = await stopAndTranscribeAudio();
+          if (sarvamText && sarvamText.trim()) {
+            setTranscript(sarvamText.trim());
+            handleSendMessage(sarvamText.trim());
+          }
+        }
+      }, 250);
     } else {
       setTranscript('');
       transcriptRef.current = '';
@@ -192,15 +264,9 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         setIsListening(true);
         startRecording();
       } catch (e) {
-        console.warn("Recognition start failed or already active", e);
-        try {
-          recognitionRef.current?.stop();
-          setTimeout(() => {
-            recognitionRef.current?.start();
-            setIsListening(true);
-            startRecording();
-          }, 150);
-        } catch {}
+        console.warn("Recognition start failed, using MediaRecorder with Sarvam AI STT:", e);
+        setIsListening(true);
+        startRecording();
       }
     }
   };
@@ -252,20 +318,11 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
 
     try {
-      let context = '';
-      try {
-        const kbSnap = await getDocs(collection(db, 'knowledge_base'));
-        context = kbSnap.docs.map(doc => doc.data().content).join('\n');
-      } catch (e) {
-        console.warn("Could not fetch Firestore KB context, proceeding:", e);
-      }
-
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           message: queryText, 
-          context, 
           language, 
           profile 
         })
@@ -328,18 +385,15 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     };
     
     try {
-      // 1. Save to SQLite / Turso database via server API
-      await fetch('/api/complaints/add', {
+      // Save directly to Turso database via server API
+      const res = await fetch('/api/complaints/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(complaintData)
       });
-
-      // 2. Also sync to Firestore
-      try {
-        await addDoc(collection(db, 'complaints'), complaintData);
-      } catch (firestoreErr) {
-        console.warn('Firestore sync optional:', firestoreErr);
+      
+      if (!res.ok) {
+        throw new Error("Failed to register complaint");
       }
       
       const successMsg: VoiceInteraction = { 
