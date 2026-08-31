@@ -5,9 +5,9 @@ import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
 import { createClient } from "@libsql/client";
 import * as pdf from "pdf-parse";
-import { GoogleGenAI } from "@google/genai";
-import { openai } from "@ai-sdk/openai";
-import { groq } from "@ai-sdk/groq";
+import Tesseract from "tesseract.js";
+import { createOpenAI } from "@ai-sdk/openai";
+import { createGroq } from "@ai-sdk/groq";
 import { generateText } from "ai";
 import twilio from "twilio";
 import dotenv from "dotenv";
@@ -17,20 +17,123 @@ dotenv.config();
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// Lazy initialization for Gemini AI SDK
-let geminiClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI {
-  if (!geminiClient) {
-    geminiClient = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY,
-      httpOptions: {
-        headers: {
-          "User-Agent": "aistudio-build",
-        },
-      },
-    });
+// Helper for timeout-safe fetch
+async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 12000): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timeoutId);
+    return res;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
   }
-  return geminiClient;
+}
+
+// Universal Fast & Resilient LLM Invocation Helper
+async function runLLMGeneration({
+  system,
+  prompt,
+  messages,
+}: {
+  system?: string;
+  prompt?: string;
+  messages?: any[];
+}): Promise<string> {
+  const groqKeys = [
+    process.env.GROQ_API_KEY,
+    "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"
+  ].filter(Boolean) as string[];
+
+  const vercelKeys = [
+    process.env.OPENAI_API_KEY,
+    "vck_3GaBkIjy2p0dPWns5uvuO7an1KdbnY1bAeIT6WHAXoYSXORqJF1rhJMo"
+  ].filter(Boolean) as string[];
+
+  const formattedMessages = messages && messages.length > 0
+    ? messages
+    : [
+        ...(system ? [{ role: "system", content: system }] : []),
+        { role: "user", content: prompt || "" }
+      ];
+
+  // 1. First Priority: Active Groq Fast LLMs (Ultra-low latency, 8s timeout)
+  const activeGroqModels = [
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "groq/compound",
+    "openai/gpt-oss-20b"
+  ];
+
+  for (const gKey of groqKeys) {
+    if (!gKey || gKey === "YOUR_GROQ_API_KEY") continue;
+    for (const gModel of activeGroqModels) {
+      try {
+        const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${gKey}`,
+          },
+          body: JSON.stringify({
+            model: gModel,
+            messages: formattedMessages,
+            temperature: 0.5,
+            max_tokens: 600,
+          }),
+        }, 8000);
+
+        if (groqRes.ok) {
+          const data: any = await groqRes.json();
+          const reply = data?.choices?.[0]?.message?.content;
+          if (reply && reply.trim()) {
+            return reply.trim();
+          }
+        }
+      } catch (err: any) {
+        // Try next
+      }
+    }
+  }
+
+  // 2. Second Priority: Vercel AI Gateway (openai/gpt-4o-mini / gpt-4o)
+  const vercelModels = [
+    "openai/gpt-4o-mini",
+    "openai/gpt-4o"
+  ];
+
+  for (const vKey of vercelKeys) {
+    if (!vKey || vKey === "YOUR_OPENAI_API_KEY") continue;
+    for (const vModel of vercelModels) {
+      try {
+        const gatewayRes = await fetchWithTimeout("https://ai-gateway.vercel.sh/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${vKey}`,
+          },
+          body: JSON.stringify({
+            model: vModel,
+            messages: formattedMessages,
+            max_tokens: 600,
+          }),
+        }, 10000);
+
+        if (gatewayRes.ok) {
+          const data: any = await gatewayRes.json();
+          const reply = data?.choices?.[0]?.message?.content;
+          if (reply && reply.trim()) {
+            return reply.trim();
+          }
+        }
+      } catch (e: any) {
+        // Try next
+      }
+    }
+  }
+
+  return "";
 }
 
 // Turso Setup
@@ -146,93 +249,54 @@ app.post("/api/process-document", upload.single("file"), async (req: MulterReque
     const originalName = req.file.originalname || "document";
 
     if (fileType === "application/pdf" || originalName.toLowerCase().endsWith(".pdf")) {
-      // First attempt full multimodal recognition using Gemini 3.7 Flash native PDF understanding
       try {
-        const ai = getGeminiClient();
-        const response = await ai.models.generateContent({
-          model: "gemini-3.7-flash",
-          contents: [
-            {
-              inlineData: {
-                data: req.file.buffer.toString("base64"),
-                mimeType: "application/pdf",
-              },
-            },
-            {
-              text: `Perform comprehensive, accurate text extraction and OCR on this entire PDF document.
-Extract all headings, paragraphs, food menus, dish items, prices, ingredients, policies, FAQs, contact info, rules, and table data.
-Format the output cleanly in readable Markdown with clear sections. Do not summarize or truncate any text. Include every detail.`,
-            },
-          ],
-        });
-        content = response.text || "";
-      } catch (geminiErr: any) {
-        console.warn("Gemini PDF extraction encountered issue, falling back to pdf-parse:", geminiErr?.message);
-        // Fallback to pdf-parse
         const pdfParser = (pdf as any).default || pdf;
         const data = await pdfParser(req.file.buffer);
         content = data.text || "";
+      } catch (err: any) {
+        console.warn("pdf-parse extraction failed:", err?.message);
+      }
+    } else if (fileType.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|heic|tiff)$/i.test(originalName)) {
+      // 1. Run local Tesseract OCR
+      try {
+        const ocrResult = await Tesseract.recognize(req.file.buffer, 'eng');
+        const rawOcrText = ocrResult?.data?.text || "";
+        if (rawOcrText.trim()) {
+          // Format & clean up OCR text if LLM is available
+          const structuredText = await runLLMGeneration({
+            system: "You are an AI document formatter. Reorganize and clean up raw OCR text into structured Markdown with clear headings, menu item names, prices, ingredients, descriptions, and policies. Do not invent any facts.",
+            prompt: `Clean and format this raw OCR text:\n\n${rawOcrText}`,
+          });
+          content = structuredText || rawOcrText;
+        }
+      } catch (ocrErr: any) {
+        console.warn("Tesseract OCR fallback failed, attempting vision model:", ocrErr?.message);
       }
 
-      // If content is still empty, try pdf-parse as secondary
+      // 2. If Tesseract didn't get text, try multimodal LLM
       if (!content.trim()) {
         try {
-          const pdfParser = (pdf as any).default || pdf;
-          const data = await pdfParser(req.file.buffer);
-          content = data.text || "";
-        } catch (e) {
-          console.warn("pdf-parse fallback also failed", e);
+          content = await runLLMGeneration({
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'text', text: 'Exhaustively extract and transcribe all text, menu items, prices, policies, and details from this image in clean Markdown.' },
+                { type: 'image', image: req.file.buffer }
+              ]
+            }]
+          });
+        } catch (visionErr: any) {
+          console.warn("Vision LLM failed:", visionErr?.message);
         }
       }
-    } else if (fileType.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|heic)$/i.test(originalName)) {
-      // Multimodal Vision OCR with Gemini 3.7 Flash
-      const ai = getGeminiClient();
-      const detectedMime = fileType.startsWith("image/") ? fileType : "image/jpeg";
-      const response = await ai.models.generateContent({
-        model: "gemini-3.7-flash",
-        contents: [
-          {
-            inlineData: {
-              data: req.file.buffer.toString("base64"),
-              mimeType: detectedMime,
-            },
-          },
-          {
-            text: `Exhaustively extract and transcribe all text from this image or document.
-Extract every single line of text, menu items, prices, dish descriptions, ingredients, contact numbers, notices, opening hours, hygiene standards, refund policies, and any fine print.
-Format the output into clean, structured Markdown with headings and bullet points so it acts as complete knowledge base context. Do not omit any words or numbers.`,
-          },
-        ],
-      });
-      content = response.text || "";
     } else if (fileType === "text/plain" || fileType === "text/markdown" || fileType === "text/csv" || /\.(txt|md|csv|json)$/i.test(originalName)) {
       content = req.file.buffer.toString("utf-8");
     } else {
-      // Attempt Gemini generic multimodal ingestion
-      try {
-        const ai = getGeminiClient();
-        const response = await ai.models.generateContent({
-          model: "gemini-3.7-flash",
-          contents: [
-            {
-              inlineData: {
-                data: req.file.buffer.toString("base64"),
-                mimeType: fileType,
-              },
-            },
-            {
-              text: "Extract all available text, information, and knowledge from this file.",
-            },
-          ],
-        });
-        content = response.text || "";
-      } catch (fallbackErr) {
-        content = req.file.buffer.toString("utf-8");
-      }
+      content = req.file.buffer.toString("utf-8");
     }
 
     if (!content.trim()) {
-      return res.status(400).json({ error: "Could not extract readable text from the uploaded file." });
+      return res.status(400).json({ error: "Could not extract readable text from the uploaded file. Please ensure the image is clear and contains text." });
     }
 
     res.json({ 
@@ -287,59 +351,12 @@ INSTRUCTIONS & BEHAVIOR:
 4. Keep spoken responses concise, natural, and clear (1-3 sentences), ideal for voice synthesis.
 5. Always speak in the requested language (${language || "English"}).`;
 
-    let responseText = "";
+    let responseText = await runLLMGeneration({
+      system: systemPrompt,
+      prompt: message,
+    });
 
-    // 1. Try Gemini 3.7 Flash if valid key
-    const geminiKey = process.env.GEMINI_API_KEY;
-    if (geminiKey && geminiKey !== "MY_GEMINI_API_KEY" && geminiKey.trim().length > 10) {
-      try {
-        const ai = getGeminiClient();
-        const result = await ai.models.generateContent({
-          model: "gemini-3.7-flash",
-          contents: [{ text: message }],
-          config: {
-            systemInstruction: systemPrompt,
-            temperature: 0.4,
-          },
-        });
-        responseText = result.text || "";
-      } catch (geminiErr: any) {
-        console.warn("Gemini generation skipped or failed:", geminiErr?.message);
-      }
-    }
-
-    // 2. Fallback to Groq (Fast Llama-3.3-70B inference)
-    if (!responseText) {
-      const groqKey = process.env.GROQ_API_KEY || "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";
-      if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
-        try {
-          const { text } = await generateText({
-            model: groq("llama-3.3-70b-versatile"),
-            system: systemPrompt,
-            prompt: message,
-          });
-          responseText = text;
-        } catch (groqErr: any) {
-          console.warn("Groq generation failed, attempting OpenAI / fallback:", groqErr?.message);
-        }
-      }
-    }
-
-    // 3. Fallback to OpenAI if configured
-    if (!responseText && process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== "YOUR_OPENAI_API_KEY") {
-      try {
-        const { text } = await generateText({
-          model: openai("gpt-4o-mini"),
-          system: systemPrompt,
-          prompt: message,
-        });
-        responseText = text;
-      } catch (openAiErr: any) {
-        console.warn("OpenAI generation failed:", openAiErr?.message);
-      }
-    }
-
-    // 4. Guaranteed natural fallback response
+    // Guaranteed natural fallback response if keys fail
     if (!responseText) {
       if (language === 'Kannada') {
         responseText = "ನಮಸ್ಕಾರ! ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ಸ್ವೀಕರಿಸಲಾಗಿದೆ. ನಮ್ಮ ಆಹಾರ ಪದಾರ್ಥಗಳು ಮತ್ತು ಸೇವೆಗಳ ಬಗ್ಗೆ ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?";
@@ -409,7 +426,7 @@ app.post("/api/tts", async (req, res) => {
   }
 });
 
-// API: Sarvam AI Speech-to-Text (STT)
+// API: Robust Multi-Tier Speech-to-Text (STT) - Sarvam AI + Groq Whisper + OpenAI
 app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
   try {
     if (!req.file) {
@@ -418,35 +435,89 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
 
     const { language } = req.body;
     const sarvamKey = process.env.SARVAM_API_KEY || "sk_8fboduyu_lLPqcpjGwCmBBBKaMF7JwsW5";
+    const groqKey = process.env.GROQ_API_KEY || "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";
 
     let targetLang = "unknown";
-    if (language === "Hindi") targetLang = "hi-IN";
-    else if (language === "Kannada") targetLang = "kn-IN";
-    else if (language === "English") targetLang = "en-IN";
+    if (language === "Hindi" || language === "hi-IN") targetLang = "hi-IN";
+    else if (language === "Kannada" || language === "kn-IN") targetLang = "kn-IN";
+    else if (language === "English" || language === "en-IN") targetLang = "en-IN";
 
-    const formData = new FormData();
-    const blob = new Blob([req.file.buffer], { type: req.file.mimetype || "audio/webm" });
-    formData.append("file", blob, "voice.webm");
-    formData.append("language_code", targetLang);
-    formData.append("model", "saaras:v1");
+    // 1. Try Sarvam AI Saaras STT
+    if (sarvamKey && sarvamKey !== "YOUR_SARVAM_API_KEY") {
+      try {
+        const formData = new FormData();
+        const audioBuffer = req.file.buffer;
+        const mime = req.file.mimetype || "audio/webm";
+        const fileObj = typeof File !== "undefined"
+          ? new File([audioBuffer], "voice.webm", { type: mime })
+          : new Blob([audioBuffer], { type: mime });
+          
+        formData.append("file", fileObj as any, "voice.webm");
+        if (targetLang !== "unknown") {
+          formData.append("language_code", targetLang);
+        }
+        formData.append("model", "saaras:v3");
 
-    const response = await fetch("https://api.sarvam.ai/speech-to-text", {
-      method: "POST",
-      headers: {
-        "api-subscription-key": sarvamKey,
-      },
-      body: formData,
-    });
+        const response = await fetch("https://api.sarvam.ai/speech-to-text", {
+          method: "POST",
+          headers: {
+            "api-subscription-key": sarvamKey,
+          },
+          body: formData,
+        });
 
-    const data: any = await response.json();
-    if (data.transcript) {
-      return res.json({ transcript: data.transcript });
+        const contentType = response.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const data: any = await response.json();
+          if (data.transcript && data.transcript.trim()) {
+            return res.json({ transcript: data.transcript.trim(), provider: "sarvam" });
+          }
+        }
+      } catch (sarvamErr: any) {
+        console.warn("Sarvam STT failed, attempting Groq Whisper:", sarvamErr?.message);
+      }
     }
 
-    res.status(400).json({ error: data.message || "Speech transcription failed" });
+    // 2. Try Groq Whisper STT (whisper-large-v3-turbo)
+    if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
+      try {
+        const formData = new FormData();
+        const audioBuffer = req.file.buffer;
+        const mime = req.file.mimetype || "audio/webm";
+        const fileObj = typeof File !== "undefined"
+          ? new File([audioBuffer], "voice.webm", { type: mime })
+          : new Blob([audioBuffer], { type: mime });
+
+        formData.append("file", fileObj as any, "voice.webm");
+        formData.append("model", "whisper-large-v3-turbo");
+        if (language === "Hindi") formData.append("language", "hi");
+        else if (language === "Kannada") formData.append("language", "kn");
+        else if (language === "English") formData.append("language", "en");
+
+        const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${groqKey}`,
+          },
+          body: formData,
+        });
+
+        const contentType = groqRes.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          const groqData: any = await groqRes.json();
+          if (groqData.text && groqData.text.trim()) {
+            return res.json({ transcript: groqData.text.trim(), provider: "groq-whisper" });
+          }
+        }
+      } catch (groqWhisperErr: any) {
+        console.warn("Groq Whisper STT failed:", groqWhisperErr?.message);
+      }
+    }
+
+    res.status(200).json({ transcript: "", error: "Could not transcribe audio from speech providers." });
   } catch (err: any) {
-    console.error("Sarvam STT error:", err);
-    res.status(500).json({ error: err.message });
+    console.error("STT endpoint error:", err);
+    res.status(200).json({ transcript: "", error: err.message });
   }
 });
 
@@ -653,7 +724,6 @@ app.post("/api/admin/ai-eval-erase", async (req, res) => {
   }
 
   try {
-    const ai = getGeminiClient();
     const systemInstruction = `You are an AI database curator and pruning agent for a food service knowledge base.
 Your job is to strictly evaluate a list of database documents against the user's natural language erasure prompt, and determine exactly which document IDs should be deleted.
 
@@ -690,17 +760,10 @@ ${JSON.stringify(documents.map((d: any) => ({
 
 Respond with JSON only.`;
 
-    const result = await ai.models.generateContent({
-      model: "gemini-3.7-flash",
-      contents: [{ text: promptPayload }],
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        temperature: 0.1,
-      },
-    });
-
-    const responseText = result.text || "{}";
+    const responseText = await runLLMGeneration({
+      system: systemInstruction,
+      prompt: promptPayload,
+    }) || "{}";
     let parsedResult: any = {};
     try {
       parsedResult = JSON.parse(responseText);
@@ -717,6 +780,12 @@ Respond with JSON only.`;
     console.error("AI Erase Evaluation error:", error);
     res.status(500).json({ error: error.message || "Failed to evaluate AI erase prompt" });
   }
+});
+
+// API Error Handler Middleware (Prevents API routes from falling through to HTML SPA fallback)
+app.use("/api", (err: any, req: any, res: any, next: any) => {
+  console.error("API Error Middleware caught:", err?.message || err);
+  res.status(err?.status || 500).json({ error: err?.message || "Internal server error" });
 });
 
 async function startServer() {

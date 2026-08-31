@@ -68,11 +68,11 @@ export default function UploadData() {
     const isImage = file.type.includes('image') || /\.(jpe?g|png|webp|gif|bmp|heic)$/i.test(file.name);
 
     if (isPdf) {
-      setUploadStatus('Scanning PDF pages with Gemini Multimodal OCR...');
+      setUploadStatus('Scanning PDF pages and extracting text...');
     } else if (isImage) {
-      setUploadStatus('Recognizing all text, menus, and prices with Gemini Vision OCR...');
+      setUploadStatus('Running OCR text recognition on image...');
     } else {
-      setUploadStatus('Processing text document content...');
+      setUploadStatus('Processing document content...');
     }
 
     const formData = new FormData();
@@ -306,7 +306,7 @@ export default function UploadData() {
             <h2 className="text-lg font-bold">Multimodal Knowledge Base</h2>
           </div>
           <p className="text-xs text-indigo-200/90 leading-relaxed max-w-xl">
-            Upload food menus, pricing sheets, PDFs, or photos. Gemini OCR recognizes all dishes, ingredients, rules, and prices to train your AI voice assistant instantly.
+            Upload food menus, pricing sheets, PDFs, or photos. OCR recognizes all dishes, ingredients, rules, and prices to train your AI voice assistant instantly.
           </p>
         </div>
 
@@ -494,7 +494,7 @@ export default function UploadData() {
                     <div className="flex items-center gap-2">
                       <h3 className="font-bold text-slate-900 text-sm">AI Database Smart Erase</h3>
                       <span className="text-[10px] font-bold text-rose-700 bg-rose-100/80 px-2 py-0.5 rounded-full flex items-center gap-1">
-                        <Sparkles size={11} /> Gemini 3.7
+                        <Sparkles size={11} /> AI Engine
                       </span>
                     </div>
                     <p className="text-[11px] text-slate-500 font-medium">
@@ -519,7 +519,7 @@ export default function UploadData() {
                   <div className="text-xs text-amber-900 space-y-1">
                     <p className="font-bold">How AI Database Cleanse Works:</p>
                     <p className="text-amber-800 text-[11px] leading-relaxed">
-                      Describe the items, menu categories, or outdated data you want to remove. Gemini scans the titles, contents, and timestamps of all {files.length} knowledge base records, shows you the matching items with clear reasons, and lets you confirm before permanent deletion.
+                      Describe the items, menu categories, or outdated data you want to remove. The AI scans the titles, contents, and timestamps of all {files.length} knowledge base records, shows you the matching items with clear reasons, and lets you confirm before permanent deletion.
                     </p>
                   </div>
                 </div>
@@ -764,7 +764,7 @@ export default function UploadData() {
               </div>
 
               <div className="p-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
-                <span>Recognized by Gemini Multimodal OCR</span>
+                <span>Recognized by Multimodal OCR Engine</span>
                 <button
                   onClick={() => deleteDocument(selectedDoc.id)}
                   className="text-red-600 hover:text-red-700 font-semibold flex items-center gap-1"

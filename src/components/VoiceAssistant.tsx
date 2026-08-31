@@ -27,49 +27,76 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
   const startRecording = async () => {
     try {
+      if (micStream) {
+        micStream.getTracks().forEach(track => track.stop());
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       setMicStream(stream);
-      mediaRecorderRef.current = new MediaRecorder(stream);
+      
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+        ? 'audio/webm;codecs=opus' 
+        : MediaRecorder.isTypeSupported('audio/webm') 
+          ? 'audio/webm' 
+          : 'audio/mp4';
+      
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
-      mediaRecorderRef.current.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
       };
-      mediaRecorderRef.current.start();
+      
+      recorder.start(200); // 200ms timeslice
       setMicError(null);
-    } catch (e) { 
-      console.warn("Microphone media recorder error:", e);
-      setMicError("Microphone permission was denied. You can also type your message below.");
+    } catch (e: any) { 
+      console.warn("Microphone access error:", e);
+      setMicError("Microphone access is unavailable or blocked. Please check browser permissions or type your question below.");
     }
   };
 
   const stopAndTranscribeAudio = async (): Promise<string | null> => {
     return new Promise((resolve) => {
-      if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state === 'inactive') {
         return resolve(null);
       }
-      mediaRecorderRef.current.onstop = async () => {
-        if (audioChunksRef.current.length === 0) return resolve(null);
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const formData = new FormData();
-        formData.append('audio', audioBlob, 'speech.webm');
-        formData.append('language', language);
 
+      recorder.onstop = async () => {
+        if (audioChunksRef.current.length === 0) return resolve(null);
+        
         try {
+          const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+          if (audioBlob.size < 500) {
+            return resolve(null); // Too short to be voice
+          }
+
+          const formData = new FormData();
+          formData.append('audio', audioBlob, 'speech.webm');
+          formData.append('language', language);
+
           const res = await fetch('/api/stt', { method: 'POST', body: formData });
-          const data = await res.json();
-          if (res.ok && data.transcript) {
-            resolve(data.transcript);
+          const contentType = res.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const data = await res.json();
+            if (res.ok && data.transcript && data.transcript.trim()) {
+              resolve(data.transcript.trim());
+            } else {
+              resolve(null);
+            }
           } else {
             resolve(null);
           }
         } catch (e) {
-          console.warn("Sarvam STT error:", e);
+          console.warn("STT transcription notice:", e);
           resolve(null);
         }
       };
 
       try {
-        mediaRecorderRef.current.stop();
+        recorder.stop();
       } catch {
         resolve(null);
       }
@@ -78,13 +105,14 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
   const stopAndUploadAudio = async (): Promise<string | undefined> => {
     return new Promise((resolve) => {
-      if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state === 'inactive') {
         return resolve(undefined);
       }
       
-      mediaRecorderRef.current.onstop = async () => {
+      recorder.onstop = async () => {
         if (audioChunksRef.current.length === 0) return resolve(undefined);
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
         const formData = new FormData();
         formData.append('file', audioBlob);
         try {
@@ -96,7 +124,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         }
       };
       try {
-        mediaRecorderRef.current.stop();
+        recorder.stop();
       } catch {
         resolve(undefined);
       }
@@ -133,31 +161,27 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             const piece = event.results[i][0].transcript;
             interimTranscript += piece;
           }
-          transcriptRef.current = interimTranscript;
-          setTranscript(interimTranscript);
+          if (interimTranscript.trim()) {
+            transcriptRef.current = interimTranscript;
+            setTranscript(interimTranscript);
+          }
         };
 
         recognition.onerror = (event: any) => {
-          console.warn('Speech recognition error event:', event.error);
+          console.warn('Browser speech recognition notice:', event.error);
           if (event.error === 'not-allowed') {
-            setMicError("Microphone access was blocked. Please enable microphone permissions in your browser bar.");
+            setMicError("Microphone access blocked in browser. Please enable permissions.");
           }
-          setIsListening(false);
+          // Do not kill isListening here; MediaRecorder will capture audio and pass to Sarvam/Groq STT!
         };
 
         recognition.onend = async () => {
-          setIsListening(false);
+          // If native speech engine finishes naturally and captured words, handle it
           const capturedText = transcriptRef.current?.trim();
-          if (capturedText) {
+          if (capturedText && isListening) {
+            setIsListening(false);
             handleSendMessage(capturedText);
             transcriptRef.current = '';
-          } else {
-            // Use Sarvam AI STT if browser speech recognition failed to capture
-            const sarvamTranscript = await stopAndTranscribeAudio();
-            if (sarvamTranscript && sarvamTranscript.trim()) {
-              setTranscript(sarvamTranscript.trim());
-              handleSendMessage(sarvamTranscript.trim());
-            }
           }
         };
 
@@ -239,34 +263,36 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
   const toggleListening = async () => {
     if (isListening) {
+      setIsListening(false);
       try {
         recognitionRef.current?.stop();
       } catch (e) {
         console.warn(e);
       }
-      setIsListening(false);
 
-      // If recognition didn't auto-handle onend, ensure Sarvam STT gets transcribed
-      setTimeout(async () => {
-        if (!transcriptRef.current.trim()) {
-          const sarvamText = await stopAndTranscribeAudio();
-          if (sarvamText && sarvamText.trim()) {
-            setTranscript(sarvamText.trim());
-            handleSendMessage(sarvamText.trim());
-          }
+      const captured = transcriptRef.current.trim();
+      if (captured) {
+        handleSendMessage(captured);
+        transcriptRef.current = '';
+      } else {
+        // Fall back immediately to backend STT (Sarvam AI Saaras v3 + Groq Whisper)
+        setIsLoading(true);
+        const serverText = await stopAndTranscribeAudio();
+        setIsLoading(false);
+        if (serverText && serverText.trim()) {
+          setTranscript(serverText.trim());
+          handleSendMessage(serverText.trim());
         }
-      }, 250);
+      }
     } else {
       setTranscript('');
       transcriptRef.current = '';
+      setIsListening(true);
+      await startRecording();
       try {
         recognitionRef.current?.start();
-        setIsListening(true);
-        startRecording();
       } catch (e) {
-        console.warn("Recognition start failed, using MediaRecorder with Sarvam AI STT:", e);
-        setIsListening(true);
-        startRecording();
+        console.warn("Native recognition start notice (falling back cleanly to audio recorder):", e);
       }
     }
   };
