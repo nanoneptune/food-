@@ -103,7 +103,7 @@ export default function Admin() {
         <button 
           onClick={() => {
             setIsAuthenticated(false);
-            navigate('/');
+            navigate('/admin');
           }}
           className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs transition-colors active:scale-95 shadow-sm"
           title="Logout from Admin Panel"

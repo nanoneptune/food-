@@ -7,6 +7,7 @@ interface ParticleBallProps {
   isLoading: boolean;
   onClick: () => void;
   audioStream?: MediaStream | null;
+  compact?: boolean;
 }
 
 interface Particle3D {
@@ -32,6 +33,7 @@ export default function ParticleBall({
   isLoading,
   onClick,
   audioStream,
+  compact = false,
 }: ParticleBallProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
@@ -311,10 +313,14 @@ export default function ParticleBall({
       className="relative flex items-center justify-center cursor-pointer select-none group"
       title={isListening ? 'Tap sphere to stop listening' : 'Tap sphere to talk'}
     >
-      {/* Pure 3D Particle Canvas Sphere - No extra outer rings/light disks */}
+      {/* Pure 3D Particle Canvas Sphere */}
       <canvas
         ref={canvasRef}
-        className="w-[280px] h-[280px] sm:w-[320px] sm:h-[320px] transition-transform duration-300"
+        className={`${
+          compact 
+            ? 'w-[64px] h-[64px] sm:w-[72px] sm:h-[72px]' 
+            : 'w-[200px] h-[200px] sm:w-[240px] sm:h-[240px]'
+        } transition-all duration-300 ease-out`}
         style={{ touchAction: 'none' }}
       />
     </motion.div>

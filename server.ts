@@ -51,12 +51,18 @@ async function runLLMGeneration({
     "vck_3GaBkIjy2p0dPWns5uvuO7an1KdbnY1bAeIT6WHAXoYSXORqJF1rhJMo"
   ].filter(Boolean) as string[];
 
-  const formattedMessages = messages && messages.length > 0
+  let formattedMessages = messages && messages.length > 0
     ? messages
     : [
         ...(system ? [{ role: "system", content: system }] : []),
         { role: "user", content: prompt || "" }
       ];
+
+  if (system && messages && messages.length > 0) {
+    if (messages[0]?.role !== "system") {
+      formattedMessages = [{ role: "system", content: system }, ...messages];
+    }
+  }
 
   // 1. First Priority: Active Groq Fast LLMs (Ultra-low latency, 8s timeout)
   const activeGroqModels = [
@@ -313,7 +319,7 @@ app.post("/api/process-document", upload.single("file"), async (req: MulterReque
 
 // API: Chat with Assistant (Grounding on recognized knowledge base)
 app.post("/api/chat", async (req, res) => {
-  const { message, context, language, profile } = req.body;
+  const { message, context, language, profile, history } = req.body;
 
   try {
     let effectiveContext = context || "";
@@ -349,11 +355,24 @@ INSTRUCTIONS & BEHAVIOR:
    - You MUST append the token "COMPLAINT_DRAFT_REQUEST" at the very end of your response so the system opens the complaint confirmation dialog.
 3. If the user is confirming a complaint (saying yes, confirm, okay, ha, sari), acknowledge that it has been logged and escalated to the management.
 4. Keep spoken responses concise, natural, and clear (1-3 sentences), ideal for voice synthesis.
-5. Always speak in the requested language (${language || "English"}).`;
+5. Always speak in the requested language (${language || "English"}).
+6. Maintain memory of the conversation flow. Refer back to previous questions or topics when asked follow-up questions (e.g., "why?", "tell me more", "how much").`;
+
+    const conversationHistory = Array.isArray(history) && history.length > 0
+      ? history.slice(-8).map((h: any) => ({
+          role: (h.role === "assistant" || h.sender === "assistant") ? "assistant" : "user",
+          content: String(h.content || h.text || "")
+        }))
+      : [];
+
+    const fullMessages = [
+      ...conversationHistory,
+      { role: "user", content: message }
+    ];
 
     let responseText = await runLLMGeneration({
       system: systemPrompt,
-      prompt: message,
+      messages: fullMessages,
     });
 
     // Guaranteed natural fallback response if keys fail
@@ -382,16 +401,16 @@ app.post("/api/tts", async (req, res) => {
   const { text, language } = req.body;
   if (!text) return res.status(400).json({ error: "Text is required" });
 
-  const sarvamKey = process.env.SARVAM_API_KEY || "sk_8fboduyu_lLPqcpjGwCmBBBKaMF7JwsW5";
+  const sarvamKey = process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW";
   
   let targetLang = "en-IN";
-  let speaker = "meera";
+  let speaker = "ritu";
   if (language === "Hindi" || language === "hi-IN") {
     targetLang = "hi-IN";
-    speaker = "meera";
+    speaker = "ritu";
   } else if (language === "Kannada" || language === "kn-IN") {
     targetLang = "kn-IN";
-    speaker = "pavithra";
+    speaker = "ritu";
   }
 
   try {
@@ -406,25 +425,53 @@ app.post("/api/tts", async (req, res) => {
         inputs: [cleanedText.slice(0, 500)],
         target_language_code: targetLang,
         speaker: speaker,
-        pitch: 0,
-        pace: 1.0,
-        loudness: 1.5,
-        speech_sample_rate: 22050,
-        enable_preprocessing: true,
-        model: "bulbul:v1"
+        model: "bulbul:v3"
       })
     });
 
-    const data: any = await response.json();
-    if (data.audios && data.audios.length > 0) {
-      return res.json({ audioBase64: data.audios[0], audioFormat: "wav" });
+    if (!response.ok) {
+      console.warn(`Sarvam TTS status ${response.status}: defaulting to browser Speech Synthesis`);
+      return res.status(response.status).json({ error: "Sarvam TTS service unavailable, defaulting to browser Speech Synthesis" });
     }
-    res.status(400).json({ error: data.message || "Failed to generate TTS from Sarvam" });
+
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const data: any = await response.json();
+      if (data && data.audios && data.audios.length > 0) {
+        return res.json({ audioBase64: data.audios[0], audioFormat: "wav" });
+      }
+    }
+    res.status(400).json({ error: "Failed to generate TTS from Sarvam" });
   } catch (err: any) {
-    console.error("Sarvam TTS error:", err);
-    res.status(500).json({ error: err.message });
+    console.warn("Sarvam TTS notice:", err?.message || err);
+    res.status(500).json({ error: err.message || "TTS error" });
   }
 });
+
+// Helper to detect Whisper hallucinations on silent/quiet audio clips
+function isHallucinatedTranscript(text: string): boolean {
+  if (!text || !text.trim()) return true;
+  const clean = text.trim().toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  const hallucinations = [
+    "thank you",
+    "thank you very much",
+    "thank you so much",
+    "thank you for watching",
+    "thanks for watching",
+    "thanks",
+    "subtitles by amara org",
+    "subtitles by amaraorg",
+    "subtitles by",
+    "amara org",
+    "bye",
+    "subscribe",
+    "you",
+    "mb",
+    "silence",
+    "noise"
+  ];
+  return hallucinations.includes(clean);
+}
 
 // API: Robust Multi-Tier Speech-to-Text (STT) - Sarvam AI + Groq Whisper + OpenAI
 app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
@@ -434,7 +481,7 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
     }
 
     const { language } = req.body;
-    const sarvamKey = process.env.SARVAM_API_KEY || "sk_8fboduyu_lLPqcpjGwCmBBBKaMF7JwsW5";
+    const sarvamKey = process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW";
     const groqKey = process.env.GROQ_API_KEY || "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";
 
     let targetLang = "unknown";
@@ -456,7 +503,7 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
         if (targetLang !== "unknown") {
           formData.append("language_code", targetLang);
         }
-        formData.append("model", "saaras:v3");
+        formData.append("model", "saaras:v4");
 
         const response = await fetch("https://api.sarvam.ai/speech-to-text", {
           method: "POST",
@@ -469,8 +516,9 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
         const contentType = response.headers.get("content-type") || "";
         if (contentType.includes("application/json")) {
           const data: any = await response.json();
-          if (data.transcript && data.transcript.trim()) {
-            return res.json({ transcript: data.transcript.trim(), provider: "sarvam" });
+          const text = data?.transcript?.trim();
+          if (text && !isHallucinatedTranscript(text)) {
+            return res.json({ transcript: text, provider: "sarvam" });
           }
         }
       } catch (sarvamErr: any) {
@@ -505,8 +553,9 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
         const contentType = groqRes.headers.get("content-type") || "";
         if (contentType.includes("application/json")) {
           const groqData: any = await groqRes.json();
-          if (groqData.text && groqData.text.trim()) {
-            return res.json({ transcript: groqData.text.trim(), provider: "groq-whisper" });
+          const text = groqData?.text?.trim();
+          if (text && !isHallucinatedTranscript(text)) {
+            return res.json({ transcript: text, provider: "groq-whisper" });
           }
         }
       } catch (groqWhisperErr: any) {
@@ -782,7 +831,12 @@ Respond with JSON only.`;
   }
 });
 
-// API Error Handler Middleware (Prevents API routes from falling through to HTML SPA fallback)
+// Handle unmatched API routes to ensure JSON responses (prevents HTML fallback)
+app.use("/api", (req, res, next) => {
+  res.status(404).json({ error: `API route not found: ${req.method} ${req.path}` });
+});
+
+// API Error Handler Middleware
 app.use("/api", (err: any, req: any, res: any, next: any) => {
   console.error("API Error Middleware caught:", err?.message || err);
   res.status(err?.status || 500).json({ error: err?.message || "Internal server error" });
