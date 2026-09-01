@@ -56,6 +56,132 @@ async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 1200
   }
 }
 
+// Universal Fast & Resilient LLM Invocation Helper
+async function runLLMGeneration({
+  system,
+  prompt,
+  messages,
+}: {
+  system?: string;
+  prompt?: string;
+  messages?: any[];
+}): Promise<string> {
+  const groqKeys = [
+    process.env.GROQ_API_KEY,
+    "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"
+  ].filter(Boolean) as string[];
+
+  const vercelKeys = [
+    process.env.OPENAI_API_KEY,
+    "vck_3GaBkIjy2p0dPWns5uvuO7an1KdbnY1bAeIT6WHAXoYSXORqJF1rhJMo"
+  ].filter(Boolean) as string[];
+
+  let formattedMessages = messages && messages.length > 0
+    ? messages
+    : [
+        ...(system ? [{ role: "system", content: system }] : []),
+        { role: "user", content: prompt || "" }
+      ];
+
+  if (system && messages && messages.length > 0) {
+    if (messages[0]?.role !== "system") {
+      formattedMessages = [{ role: "system", content: system }, ...messages];
+    }
+  }
+
+  // 1. First Priority: Active Groq Fast LLMs (Ultra-low latency, 8s timeout)
+  const activeGroqModels = [
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "groq/compound",
+    "openai/gpt-oss-20b"
+  ];
+
+  for (const gKey of groqKeys) {
+    if (!gKey || gKey === "YOUR_GROQ_API_KEY") continue;
+    for (const gModel of activeGroqModels) {
+      try {
+        const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${gKey}`,
+          },
+          body: JSON.stringify({
+            model: gModel,
+            messages: formattedMessages,
+            temperature: 0.5,
+            max_tokens: 600,
+          }),
+        }, 8000);
+
+        if (groqRes.ok) {
+          const data: any = await groqRes.json();
+          const reply = data?.choices?.[0]?.message?.content;
+          if (reply && reply.trim()) {
+            return reply.trim();
+          }
+        }
+      } catch (err: any) {
+        // Try next
+      }
+    }
+  }
+
+  // 2. Second Priority: Vercel AI Gateway (openai/gpt-4o-mini / gpt-4o)
+  const vercelModels = [
+    "openai/gpt-4o-mini",
+    "openai/gpt-4o"
+  ];
+
+  for (const vKey of vercelKeys) {
+    if (!vKey || vKey === "YOUR_OPENAI_API_KEY") continue;
+    for (const vModel of vercelModels) {
+      try {
+        const gatewayRes = await fetchWithTimeout("https://ai-gateway.vercel.sh/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${vKey}`,
+          },
+          body: JSON.stringify({
+            model: vModel,
+            messages: formattedMessages,
+            max_tokens: 600,
+          }),
+        }, 10000);
+
+        if (gatewayRes.ok) {
+          const data: any = await gatewayRes.json();
+          const reply = data?.choices?.[0]?.message?.content;
+          if (reply && reply.trim()) {
+            return reply.trim();
+          }
+        }
+      } catch (e: any) {
+        // Try next
+      }
+    }
+  }
+
+  return "";
+}
+}
+
+// Helper for timeout-safe fetch
+async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 12000): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    clearTimeout(timeoutId);
+    return res;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
+}
+
 // Universal Fast & Resilient LLM Invocation Helper (Gemini + Groq + OpenAI)
 async function runLLMGeneration({
   system,
@@ -801,7 +927,6 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
           },
           body: formData,
         });
-
         const contentType = response.headers.get("content-type") || "";
         if (contentType.includes("application/json")) {
           const data: any = await response.json();
