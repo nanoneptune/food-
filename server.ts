@@ -1,6 +1,5 @@
 import express, { Request } from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
 import { createClient } from "@libsql/client";
@@ -15,9 +14,15 @@ import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { PassThrough } from "stream";
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-
 dotenv.config();
+
+try {
+  if (ffmpegInstaller && ffmpegInstaller.path) {
+    ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  }
+} catch (e) {
+  console.warn("FFmpeg path setup notice:", e);
+}
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -1125,6 +1130,7 @@ app.use("/api", (err: any, req: any, res: any, next: any) => {
 
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
