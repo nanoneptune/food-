@@ -150,8 +150,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             }
             const average = sum / dataArray.length;
 
-            // Volume threshold for human speech
-            if (average > 10) {
+            // Volume threshold for human speech (sensitive enough for soft speaking)
+            if (average > 5) {
               hasSpokenRef.current = true;
               lastSoundTimeRef.current = Date.now();
               if (silenceTimerRef.current) {
@@ -159,8 +159,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                 silenceTimerRef.current = null;
               }
             } else if (hasSpokenRef.current && lastSoundTimeRef.current > 0) {
-              // 1.2 seconds of silence after user spoke -> Auto Stop & Send!
-              if (Date.now() - lastSoundTimeRef.current > 1200) {
+              // 2.5 seconds of silence after user spoke -> Auto Stop & Send!
+              if (Date.now() - lastSoundTimeRef.current > 2500) {
                 hasSpokenRef.current = false;
                 lastSoundTimeRef.current = 0;
                 stopListeningAndSend();
@@ -195,44 +195,32 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             return resolve(null); // Too short to be voice
           }
 
-          const isKannada = language === 'Kannada';
+          // 1. Send recorded audio to high-accuracy server STT (/api/stt: Sarvam AI Saaras -> Groq Whisper -> Gemini STT Backup)
+          try {
+            const formData = new FormData();
+            formData.append('audio', audioBlob, 'speech.webm');
+            formData.append('language', language);
 
-          // 1. If not Kannada, try ultra-fast In-Browser Transformers.js Whisper first
-          if (!isKannada) {
-            try {
-              const inBrowserText = await transcribeAudioInBrowser(audioBlob, language);
-              if (inBrowserText && inBrowserText.trim() && !isHallucinatedText(inBrowserText)) {
-                return resolve(inBrowserText.trim());
+            const res = await fetch('/api/stt', { method: 'POST', body: formData });
+            const contentType = res.headers.get('content-type') || '';
+            if (contentType.includes('application/json')) {
+              const data = await res.json();
+              if (res.ok && data.transcript && data.transcript.trim()) {
+                return resolve(data.transcript.trim());
               }
-            } catch (browserErr) {
-              console.warn("Client Whisper fallback notice:", browserErr);
             }
+          } catch (serverErr) {
+            console.warn("Server STT request notice:", serverErr);
           }
 
-          // 2. Route to server STT (/api/stt: Sarvam AI Saaras -> Groq Whisper -> Gemini STT Backup)
-          const formData = new FormData();
-          formData.append('audio', audioBlob, 'speech.webm');
-          formData.append('language', language);
-
-          const res = await fetch('/api/stt', { method: 'POST', body: formData });
-          const contentType = res.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            const data = await res.json();
-            if (res.ok && data.transcript && data.transcript.trim()) {
-              return resolve(data.transcript.trim());
+          // 2. Client-side fallback: In-browser Transformers.js Whisper
+          try {
+            const clientText = await transcribeAudioInBrowser(audioBlob, language);
+            if (clientText && clientText.trim() && !isHallucinatedText(clientText)) {
+              return resolve(clientText.trim());
             }
-          }
-
-          // 3. Last fallback for Kannada: In-Browser Transformers.js multilingual Whisper
-          if (isKannada) {
-            try {
-              const clientText = await transcribeAudioInBrowser(audioBlob, 'Kannada');
-              if (clientText && clientText.trim() && !isHallucinatedText(clientText)) {
-                return resolve(clientText.trim());
-              }
-            } catch (clientErr) {
-              console.warn("Client Kannada Whisper fallback notice:", clientErr);
-            }
+          } catch (clientErr) {
+            console.warn("Client Whisper fallback notice:", clientErr);
           }
 
           resolve(null);
@@ -319,7 +307,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               stopSpeaking();
             }
 
-            // Auto Silence Detection: After 1.2s of no new spoken words, automatically finish & respond!
+            // Auto Silence Detection: After 2.5s of no new spoken words, finish & respond!
             if (silenceTimerRef.current) {
               clearTimeout(silenceTimerRef.current);
             }
@@ -327,7 +315,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               if (isListeningRef.current) {
                 stopListeningAndSend();
               }
-            }, 1200);
+            }, 2500);
           }
         };
 
@@ -339,7 +327,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             if (isListeningRef.current) {
               stopListeningAndSend();
             }
-          }, 600);
+          }, 2000);
         };
 
         recognition.onerror = (event: any) => {

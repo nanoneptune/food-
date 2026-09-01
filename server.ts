@@ -3,7 +3,6 @@ import path from "path";
 import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
 import { createClient } from "@libsql/client";
-import * as pdf from "pdf-parse";
 import Tesseract from "tesseract.js";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGroq } from "@ai-sdk/groq";
@@ -475,7 +474,8 @@ app.post("/api/process-document", upload.single("file"), async (req: MulterReque
 
     if (fileType === "application/pdf" || originalName.toLowerCase().endsWith(".pdf")) {
       try {
-        const pdfParser = (pdf as any).default || pdf;
+        const pdfModule = await import("pdf-parse");
+        const pdfParser = (pdfModule as any).default || pdfModule;
         const data = await pdfParser(req.file.buffer);
         content = data.text || "";
       } catch (err: any) {
