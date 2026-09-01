@@ -52,6 +52,10 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const silenceTimerRef = useRef<any>(null);
   const isListeningRef = useRef<boolean>(false);
   const isSpeakingRef = useRef<boolean>(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const vadIntervalRef = useRef<any>(null);
+  const hasSpokenRef = useRef<boolean>(false);
+  const lastSoundTimeRef = useRef<number>(0);
 
   const updateListeningState = (val: boolean) => {
     isListeningRef.current = val;
@@ -89,6 +93,18 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       if (micStream) {
         micStream.getTracks().forEach(track => track.stop());
       }
+      if (vadIntervalRef.current) {
+        clearInterval(vadIntervalRef.current);
+        vadIntervalRef.current = null;
+      }
+      if (audioContextRef.current) {
+        try { audioContextRef.current.close(); } catch {}
+        audioContextRef.current = null;
+      }
+
+      hasSpokenRef.current = false;
+      lastSoundTimeRef.current = 0;
+
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       setMicStream(stream);
       
@@ -108,7 +124,53 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         }
       };
       
-      recorder.start(200); // 200ms timeslice
+      recorder.start(100); // 100ms timeslice for responsive audio capture
+
+      // AudioContext Voice Activity Detection (VAD) for instant silence response
+      try {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          const audioCtx = new AudioCtx();
+          audioContextRef.current = audioCtx;
+          const source = audioCtx.createMediaStreamSource(stream);
+          const analyser = audioCtx.createAnalyser();
+          analyser.fftSize = 512;
+          analyser.smoothingTimeConstant = 0.4;
+          source.connect(analyser);
+
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+          
+          vadIntervalRef.current = setInterval(() => {
+            if (!isListeningRef.current) return;
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+              sum += dataArray[i];
+            }
+            const average = sum / dataArray.length;
+
+            // Volume threshold for human speech
+            if (average > 10) {
+              hasSpokenRef.current = true;
+              lastSoundTimeRef.current = Date.now();
+              if (silenceTimerRef.current) {
+                clearTimeout(silenceTimerRef.current);
+                silenceTimerRef.current = null;
+              }
+            } else if (hasSpokenRef.current && lastSoundTimeRef.current > 0) {
+              // 1.2 seconds of silence after user spoke -> Auto Stop & Send!
+              if (Date.now() - lastSoundTimeRef.current > 1200) {
+                hasSpokenRef.current = false;
+                lastSoundTimeRef.current = 0;
+                stopListeningAndSend();
+              }
+            }
+          }, 100);
+        }
+      } catch (vadErr) {
+        console.warn("VAD audio analyser notice:", vadErr);
+      }
+
       setMicError(null);
     } catch (e: any) { 
       console.warn("Microphone access error:", e);
@@ -223,20 +285,35 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           if (interimTranscript.trim()) {
             transcriptRef.current = interimTranscript;
             setTranscript(interimTranscript);
+            hasSpokenRef.current = true;
+            lastSoundTimeRef.current = Date.now();
 
             // User barge-in: If user speaks while AI audio is active, stop AI speech immediately
             if (isSpeakingRef.current || activeAudioRef.current) {
               stopSpeaking();
             }
 
-            // Auto Silence Detection: After 2.5s of no new spoken words, automatically finish & send!
+            // Auto Silence Detection: After 1.2s of no new spoken words, automatically finish & respond!
             if (silenceTimerRef.current) {
               clearTimeout(silenceTimerRef.current);
             }
             silenceTimerRef.current = setTimeout(() => {
-              stopListeningAndSend();
-            }, 2500);
+              if (isListeningRef.current) {
+                stopListeningAndSend();
+              }
+            }, 1200);
           }
+        };
+
+        recognition.onspeechend = () => {
+          if (silenceTimerRef.current) {
+            clearTimeout(silenceTimerRef.current);
+          }
+          silenceTimerRef.current = setTimeout(() => {
+            if (isListeningRef.current) {
+              stopListeningAndSend();
+            }
+          }, 600);
         };
 
         recognition.onerror = (event: any) => {
@@ -326,6 +403,12 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
+    if (vadIntervalRef.current) {
+      clearInterval(vadIntervalRef.current);
+      vadIntervalRef.current = null;
+    }
+    hasSpokenRef.current = false;
+    lastSoundTimeRef.current = 0;
     updateListeningState(false);
 
     try {
@@ -482,11 +565,11 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       }
     } catch (error: any) { 
       console.error("Chat error:", error);
-      let errorText = "I'm having trouble connecting to the AI service. Please verify your API key (GEMINI_API_KEY / GROQ_API_KEY) in Vercel environment settings.";
+      let errorText = "I'm having trouble connecting to the AI service. Please verify your API key (GROQ_API_KEY) in Vercel environment settings.";
       if (language === 'Kannada' || language === 'kn-IN') {
-        errorText = "ಸಂಪರ್ಕಿಸುವಲ್ಲಿ ಸಮಸ್ಯೆ ಉಂಟಾಗಿದೆ. ದಯವಿಟ್ಟು Vercel ಪರಿರಚನೆಯಲ್ಲಿ ನಿಮ್ಮ API ಕೀಲಿಯನ್ನು (GEMINI_API_KEY) ಪರಿಶೀಲಿಸಿ.";
+        errorText = "ಸಂಪರ್ಕಿಸುವಲ್ಲಿ ಸಮಸ್ಯೆ ಉಂಟಾಗಿದೆ. ದಯವಿಟ್ಟು Vercel ಪರಿರಚನೆಯಲ್ಲಿ ನಿಮ್ಮ API ಕೀಲಿಯನ್ನು (GROQ_API_KEY) ಪರಿಶೀಲಿಸಿ.";
       } else if (language === 'Hindi' || language === 'hi-IN') {
-        errorText = "कनेक्ट करने में समस्या आ रही है। कृपया Vercel सेटिंग्स में अपनी API कुंजी (GEMINI_API_KEY) की जाँच करें।";
+        errorText = "कनेक्ट करने में समस्या आ रही है। कृपया Vercel सेटिंग्स में अपनी API कुंजी (GROQ_API_KEY) की जाँच करें।";
       }
 
       const fallbackMsg: VoiceInteraction = {

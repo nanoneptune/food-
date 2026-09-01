@@ -56,7 +56,7 @@ async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 1200
   }
 }
 
-// Universal Fast & Resilient LLM Invocation Helper (Gemini + Groq + OpenAI)
+// Universal Fast & Resilient LLM Invocation Helper (Groq + OpenAI)
 async function runLLMGeneration({
   system,
   prompt,
@@ -79,60 +79,7 @@ async function runLLMGeneration({
     }
   }
 
-  // 1. Primary Option: Google Gemini API (GEMINI_API_KEY / GOOGLE_GENAI_API_KEY / API_KEY)
-  const geminiKeys = [
-    process.env.GEMINI_API_KEY,
-    process.env.GOOGLE_GENAI_API_KEY,
-    process.env.API_KEY,
-  ].filter(Boolean) as string[];
-
-  for (const geminiKey of geminiKeys) {
-    if (!geminiKey || geminiKey === "YOUR_GEMINI_API_KEY") continue;
-    try {
-      const { GoogleGenAI } = await import("@google/genai");
-      const ai = new GoogleGenAI({ apiKey: geminiKey });
-      
-      const contents = formattedMessages.map((m: any) => ({
-        role: m.role === "assistant" ? "model" : "user",
-        parts: [{ text: typeof m.content === "string" ? m.content : (typeof m.content === "object" ? JSON.stringify(m.content) : String(m.content)) }]
-      }));
-
-      const res = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents,
-        ...(system ? { config: { systemInstruction: system } } : {}),
-      });
-
-      if (res.text && res.text.trim()) {
-        return res.text.trim();
-      }
-    } catch (gErr: any) {
-      console.warn("Gemini SDK call notice, trying REST endpoint:", gErr?.message);
-      try {
-        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-        const restRes = await fetchWithTimeout(restUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            system_instruction: system ? { parts: [{ text: system }] } : undefined,
-            contents: formattedMessages.map((m: any) => ({
-              role: m.role === "assistant" ? "model" : "user",
-              parts: [{ text: typeof m.content === "string" ? m.content : JSON.stringify(m.content) }]
-            }))
-          })
-        }, 8000);
-        if (restRes.ok) {
-          const restData: any = await restRes.json();
-          const text = restData?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (text && text.trim()) return text.trim();
-        }
-      } catch (restErr: any) {
-        console.warn("Gemini REST endpoint notice:", restErr?.message);
-      }
-    }
-  }
-
-  // 2. Second Priority: Active Groq Fast LLMs (Ultra-low latency)
+  // 1. Primary Option: Active Groq Fast LLMs (Ultra-low latency)
   const groqKeys = [
     process.env.GROQ_API_KEY,
     "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"
@@ -175,7 +122,7 @@ async function runLLMGeneration({
     }
   }
 
-  // 3. Third Priority: Vercel AI Gateway (openai/gpt-4o-mini / gpt-4o)
+  // 2. Second Priority: Vercel AI Gateway (openai/gpt-4o-mini / gpt-4o)
   const vercelKeys = [
     process.env.OPENAI_API_KEY,
     "vck_3GaBkIjy2p0dPWns5uvuO7an1KdbnY1bAeIT6WHAXoYSXORqJF1rhJMo"
@@ -325,12 +272,12 @@ app.all("/api/voice", (req: any, res: any) => {
   });
 
   // 1 for Kannada, 2 for Hindi, 3 for English
-  gather.say({ voice: "Google.en-IN-Standard-A" }, "Welcome to VoxAssist.");
-  gather.say({ voice: "Google.kn-IN-Standard-A", language: "kn-IN" }, "ಕನ್ನಡಕ್ಕಾಗಿ ಒಂದನ್ನು ಒತ್ತಿ."); // Kannadakkagi ondanna otti
-  gather.say({ voice: "Google.hi-IN-Wavenet-A", language: "hi-IN" }, "हिंदी के लिए दो दबाएं।"); // Hindi ke liye 2 dabaye
-  gather.say({ voice: "Google.en-IN-Standard-A" }, "For English, press 3.");
+  gather.say({ voice: "Google.en-IN-Standard-A" as any }, "Welcome to VoxAssist.");
+  gather.say({ voice: "Google.kn-IN-Standard-A" as any, language: "kn-IN" as any }, "ಕನ್ನಡಕ್ಕಾಗಿ ಒಂದನ್ನು ಒತ್ತಿ."); // Kannadakkagi ondanna otti
+  gather.say({ voice: "Google.hi-IN-Wavenet-A" as any, language: "hi-IN" as any }, "हिंदी के लिए दो दबाएं।"); // Hindi ke liye 2 dabaye
+  gather.say({ voice: "Google.en-IN-Standard-A" as any }, "For English, press 3.");
 
-  twiml.say({ voice: "Google.en-IN-Standard-A" }, "No selection received. Please try calling again.");
+  twiml.say({ voice: "Google.en-IN-Standard-A" as any }, "No selection received. Please try calling again.");
   twiml.redirect("/api/voice");
 
   res.type("text/xml");
@@ -372,10 +319,10 @@ app.all("/api/voice/menu-select", (req: any, res: any) => {
       method: "POST",
       timeout: 6,
     });
-    retryGather.say({ voice: "Google.en-IN-Standard-A" }, "Invalid selection.");
-    retryGather.say({ voice: "Google.kn-IN-Standard-A", language: "kn-IN" }, "ಕನ್ನಡಕ್ಕಾಗಿ ಒಂದನ್ನು ಒತ್ತಿ.");
-    retryGather.say({ voice: "Google.hi-IN-Wavenet-A", language: "hi-IN" }, "हिंदी के लिए दो दबाएं।");
-    retryGather.say({ voice: "Google.en-IN-Standard-A" }, "For English, press 3.");
+    retryGather.say({ voice: "Google.en-IN-Standard-A" as any }, "Invalid selection.");
+    retryGather.say({ voice: "Google.kn-IN-Standard-A" as any, language: "kn-IN" as any }, "ಕನ್ನಡಕ್ಕಾಗಿ ಒಂದನ್ನು ಒತ್ತಿ.");
+    retryGather.say({ voice: "Google.hi-IN-Wavenet-A" as any, language: "hi-IN" as any }, "हिंदी के लिए दो दबाएं।");
+    retryGather.say({ voice: "Google.en-IN-Standard-A" as any }, "For English, press 3.");
     twiml.redirect("/api/voice");
     res.type("text/xml");
     return res.send(twiml.toString());
@@ -388,12 +335,12 @@ app.all("/api/voice/menu-select", (req: any, res: any) => {
     method: "POST",
     speechTimeout: "auto",
     timeout: 6,
-    language: selectedLang,
+    language: selectedLang as any,
   });
 
-  gather.say({ voice: ttsVoice }, greetingText);
+  gather.say({ voice: ttsVoice as any }, greetingText);
 
-  twiml.say({ voice: ttsVoice }, "No speech detected. Please speak after the tone.");
+  twiml.say({ voice: ttsVoice as any }, "No speech detected. Please speak after the tone.");
   twiml.redirect("/api/voice");
 
   res.type("text/xml");
@@ -425,9 +372,9 @@ app.all("/api/voice/respond", async (req: any, res: any) => {
       method: "POST",
       speechTimeout: "auto",
       timeout: 6,
-      language: selectedLang,
+      language: selectedLang as any,
     });
-    gather.say({ voice: ttsVoice }, noSpeechMessage);
+    gather.say({ voice: ttsVoice as any }, noSpeechMessage);
     twiml.redirect("/api/voice");
     res.type("text/xml");
     return res.send(twiml.toString());
@@ -454,10 +401,10 @@ app.all("/api/voice/respond", async (req: any, res: any) => {
       method: "POST",
       speechTimeout: "auto",
       timeout: 6,
-      language: selectedLang,
+      language: selectedLang as any,
     });
 
-    gather.say({ voice: ttsVoice }, replyText);
+    gather.say({ voice: ttsVoice as any }, replyText);
 
     // Prompt for further questions in selected language
     let followUp = "क्या आपको किसी और चीज़ में मदद चाहिए?";
@@ -467,11 +414,11 @@ app.all("/api/voice/respond", async (req: any, res: any) => {
       followUp = "Is there anything else I can help you with?";
     }
 
-    twiml.say({ voice: ttsVoice }, followUp);
+    twiml.say({ voice: ttsVoice as any }, followUp);
     twiml.redirect("/api/voice");
   } catch (err: any) {
     console.error("IVR processing error:", err?.message || err);
-    twiml.say({ voice: ttsVoice }, "Technical issue encountered. Please try calling back later.");
+    twiml.say({ voice: ttsVoice as any }, "Technical issue encountered. Please try calling back later.");
     twiml.hangup();
   }
 
