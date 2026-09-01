@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, Send, AlertCircle, Loader2, Languages, Utensils, Upload, X, Volume2, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
+import { Mic, MicOff, Send, AlertCircle, Loader2, Languages, Utensils, Upload, X, Volume2, Sparkles, ChevronDown, ChevronUp, Cpu } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { VoiceInteraction, UserProfile } from '../types';
 import ParticleBall from './ParticleBall';
+import { transcribeAudioInBrowser } from '../lib/clientWhisper';
 
 function isHallucinatedText(text: string): boolean {
   if (!text || !text.trim()) return true;
@@ -194,6 +195,21 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             return resolve(null); // Too short to be voice
           }
 
+          const isKannada = language === 'Kannada';
+
+          // 1. If not Kannada, try ultra-fast In-Browser Transformers.js Whisper first
+          if (!isKannada) {
+            try {
+              const inBrowserText = await transcribeAudioInBrowser(audioBlob, language);
+              if (inBrowserText && inBrowserText.trim() && !isHallucinatedText(inBrowserText)) {
+                return resolve(inBrowserText.trim());
+              }
+            } catch (browserErr) {
+              console.warn("Client Whisper fallback notice:", browserErr);
+            }
+          }
+
+          // 2. Route to server STT (/api/stt: Sarvam AI Saaras -> Groq Whisper -> Gemini STT Backup)
           const formData = new FormData();
           formData.append('audio', audioBlob, 'speech.webm');
           formData.append('language', language);
@@ -203,13 +219,23 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           if (contentType.includes('application/json')) {
             const data = await res.json();
             if (res.ok && data.transcript && data.transcript.trim()) {
-              resolve(data.transcript.trim());
-            } else {
-              resolve(null);
+              return resolve(data.transcript.trim());
             }
-          } else {
-            resolve(null);
           }
+
+          // 3. Last fallback for Kannada: In-Browser Transformers.js multilingual Whisper
+          if (isKannada) {
+            try {
+              const clientText = await transcribeAudioInBrowser(audioBlob, 'Kannada');
+              if (clientText && clientText.trim() && !isHallucinatedText(clientText)) {
+                return resolve(clientText.trim());
+              }
+            } catch (clientErr) {
+              console.warn("Client Kannada Whisper fallback notice:", clientErr);
+            }
+          }
+
+          resolve(null);
         } catch (e) {
           console.warn("STT transcription notice:", e);
           resolve(null);

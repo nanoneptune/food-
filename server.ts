@@ -762,8 +762,9 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
       }
     }
 
-    // 2. Try Groq Whisper STT (whisper-large-v3-turbo)
-    if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
+    // 2. Try Groq Whisper STT (whisper-large-v3-turbo) - ONLY for non-Kannada (English/Hindi) as Groq is disabled for Kannada
+    const isKannada = language === "Kannada" || language === "kn-IN" || targetLang === "kn-IN";
+    if (!isKannada && groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
       try {
         const formData = new FormData();
         const audioBuffer = req.file.buffer;
@@ -774,9 +775,8 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
 
         formData.append("file", fileObj as any, "voice.webm");
         formData.append("model", "whisper-large-v3-turbo");
-        if (language === "Hindi") formData.append("language", "hi");
-        else if (language === "Kannada") formData.append("language", "kn");
-        else if (language === "English") formData.append("language", "en");
+        if (language === "Hindi" || language === "hi-IN") formData.append("language", "hi");
+        else formData.append("language", "en");
 
         const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
           method: "POST",
@@ -796,6 +796,45 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
         }
       } catch (groqWhisperErr: any) {
         console.warn("Groq Whisper STT failed:", groqWhisperErr?.message);
+      }
+    }
+
+    // 3. Backup: Gemini API (gemini-2.5-flash) as a final STT fallback if GEMINI_API_KEY is available
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY || process.env.API_KEY;
+    if (geminiKey && geminiKey !== "YOUR_GEMINI_API_KEY") {
+      try {
+        const audioBase64 = req.file.buffer.toString("base64");
+        const mimeType = req.file.mimetype || "audio/webm";
+        let langInstruction = "Transcribe this audio accurately.";
+        if (isKannada) {
+          langInstruction = "Transcribe this Kannada audio accurately, in Kannada script.";
+        } else if (language === "Hindi" || language === "hi-IN") {
+          langInstruction = "Transcribe this Hindi audio accurately, in Devanagari script.";
+        }
+
+        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+        const restRes = await fetchWithTimeout(restUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { inline_data: { mime_type: mimeType, data: audioBase64 } },
+                { text: langInstruction }
+              ]
+            }]
+          })
+        }, 12000);
+
+        if (restRes.ok) {
+          const restData: any = await restRes.json();
+          const text = restData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          if (text && !isHallucinatedTranscript(text)) {
+            return res.json({ transcript: text, provider: "gemini-flash" });
+          }
+        }
+      } catch (geminiErr: any) {
+        console.warn("Gemini STT backup notice:", geminiErr?.message);
       }
     }
 

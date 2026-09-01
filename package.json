@@ -19,6 +19,7 @@
     "@tailwindcss/vite": "^4.1.14",
     "@types/pdf-parse": "^1.1.5",
     "@vitejs/plugin-react": "^5.0.4",
+    "@xenova/transformers": "^2.17.2",
     "ai": "^7.0.85",
     "cloudinary": "^2.11.0",
     "clsx": "^2.1.1",
