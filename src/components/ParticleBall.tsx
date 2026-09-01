@@ -162,7 +162,7 @@ export default function ParticleBall({
 
       ctx.clearRect(0, 0, displayW, displayH);
 
-      // Determine sound energy level (from microphone analyser or synthetic speaking pulse)
+      // Determine sound energy level
       let voiceEnergy = 0;
       if (analyserRef.current && dataArrayRef.current && isListening) {
         analyserRef.current.getByteFrequencyData(dataArrayRef.current);
@@ -180,9 +180,13 @@ export default function ParticleBall({
         voiceEnergy = 0.35 + Math.sin(time * 4) * 0.25;
       }
 
-      // Rotation velocity: at rest when stopped/idle, starts rotating and interacting when tapped / active
+      // Rotation velocity: at rest when stopped/idle, spins fast when thinking (isLoading)
       let rotationSpeed = 0;
-      if (isListening || isSpeaking || isLoading) {
+      if (isLoading) {
+        rotationSpeed = 0.09; // Fast rotation while AI is thinking
+        rotY += rotationSpeed;
+        rotX = Math.sin(time * 1.5) * 0.3;
+      } else if (isListening || isSpeaking) {
         rotationSpeed = 0.018 + voiceEnergy * 0.022;
         rotY += rotationSpeed;
         rotX = Math.sin(time * 0.8) * 0.22;

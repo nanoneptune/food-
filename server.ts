@@ -235,6 +235,86 @@ async function initDB() {
         createdAt INTEGER
       )
     `);
+
+    await turso.execute(`
+      CREATE TABLE IF NOT EXISTS qa_cache (
+        id TEXT PRIMARY KEY,
+        normalized_intent TEXT,
+        language TEXT,
+        question TEXT,
+        answer TEXT,
+        audio_url TEXT,
+        created_at INTEGER
+      )
+    `);
+
+    // Seed default common Q&A items if table is empty
+    try {
+      const existing = await turso.execute("SELECT COUNT(*) as cnt FROM qa_cache");
+      const count = Number(existing.rows[0]?.cnt || 0);
+      if (count === 0) {
+        const seedItems = [
+          {
+            id: "seed_fssai_def_en",
+            normalized_intent: "definition_fssai",
+            language: "English",
+            question: "What is FSSAI?",
+            answer: "FSSAI stands for the Food Safety and Standards Authority of India. It is an autonomous body under the Ministry of Health & Family Welfare that regulates food safety, quality standards, and hygiene compliance across India."
+          },
+          {
+            id: "seed_fssai_work_en",
+            normalized_intent: "working_fssai",
+            language: "English",
+            question: "How does FSSAI work?",
+            answer: "FSSAI works by setting science-based food quality standards, issuing mandatory food business licenses, conducting kitchen hygiene inspections, and testing food samples to protect consumer health."
+          },
+          {
+            id: "seed_complaint_en",
+            normalized_intent: "file_complaint",
+            language: "English",
+            question: "How do I register a complaint?",
+            answer: "You can register a complaint by describing your issue here or uploading photos. I will draft a formal report, record your details, and submit it directly to our support team."
+          },
+          {
+            id: "seed_fssai_def_hi",
+            normalized_intent: "definition_fssai",
+            language: "Hindi",
+            question: "FSSAI क्या है?",
+            answer: "FSSAI भारतीय खाद्य सुरक्षा और मानक प्राधिकरण है। यह भारत में भोजन की गुणवत्ता, स्वच्छता और सुरक्षा मानकों को विनियमित करने वाली एक प्रमुख सरकारी संस्था है।"
+          },
+          {
+            id: "seed_fssai_work_hi",
+            normalized_intent: "working_fssai",
+            language: "Hindi",
+            question: "FSSAI कैसे काम करता है?",
+            answer: "FSSAI खाद्य लाइसेंस जारी करके, रसोईघरों की स्वच्छता की जाँच करके और भोजन के नमूनों का परीक्षण करके काम करता है ताकि उपभोक्ताओं को सुरक्षित भोजन मिल सके।"
+          },
+          {
+            id: "seed_fssai_def_kn",
+            normalized_intent: "definition_fssai",
+            language: "Kannada",
+            question: "FSSAI ಎಂದರೆ ಏನು?",
+            answer: "FSSAI ಅಂದರೆ ಭಾರತೀಯ ಆಹಾರ ಸುರಕ್ಷತೆ ಮತ್ತು ಗುಣಮಟ್ಟ ಪ್ರಾಧಿಕಾರ. ಇದು ಭಾರತದಲ್ಲಿ ಆಹಾರದ ಗುಣಮಟ್ಟ, ನೈರ್ಮಲ್ಯ ಮತ್ತು ಸುರಕ್ಷತೆಯನ್ನು ನಿಯಂತ್ರಿಸುವ ಸರ್ಕಾರಿ ಸಂಸ್ಥೆಯಾಗಿದೆ."
+          },
+          {
+            id: "seed_fssai_work_kn",
+            normalized_intent: "working_fssai",
+            language: "Kannada",
+            question: "FSSAI ಹೇಗೆ ಕೆಲಸ ಮಾಡುತ್ತದೆ?",
+            answer: "FSSAI ಆಹಾರ ಸಂಸ್ಥೆಗಳಿಗೆ ಪರವಾನಗಿ ನೀಡುವುದು, ಅಡುಗೆಮನೆಗಳ ನೈರ್ಮಲ್ಯ ತಪಾಸಣೆ ಮಾಡುವುದು ಮತ್ತು ಆಹಾರದ ಮಾದರಿಗಳನ್ನು ಪರೀಕ್ಷಿಸುವ ಮೂಲಕ ಕಾರ್ಯನಿರ್ವಹಿಸುತ್ತದೆ."
+          }
+        ];
+
+        for (const item of seedItems) {
+          await turso.execute({
+            sql: `INSERT INTO qa_cache (id, normalized_intent, language, question, answer, audio_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            args: [item.id, item.normalized_intent, item.language, item.question, item.answer, "", Date.now()]
+          });
+        }
+      }
+    } catch (sErr: any) {
+      console.warn("Seeding qa_cache notice:", sErr?.message);
+    }
   } catch (error: any) {
     console.warn("Database initialization skipped or failed:", error.message);
   }
@@ -536,9 +616,145 @@ app.post("/api/process-document", upload.single("file"), async (req: MulterReque
   }
 });
 
-// API: Chat with Assistant (Grounding on recognized knowledge base)
+// Helper to generate & upload TTS audio to Cloudinary for instant playback
+async function generateTTSAudioUrl(text: string, language: string): Promise<string | null> {
+  if (!text) return null;
+  try {
+    const sarvamKey = process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW";
+    let targetLang = "en-IN";
+    if (language === "Hindi" || language === "hi-IN") targetLang = "hi-IN";
+    else if (language === "Kannada" || language === "kn-IN") targetLang = "kn-IN";
+
+    const cleanedText = text.replace(/[*#_`~\[\]\(\)]/g, '').replace(/https?:\/\/\S+/g, '').trim();
+    const response = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-subscription-key": sarvamKey,
+      },
+      body: JSON.stringify({
+        inputs: [cleanedText.slice(0, 500)],
+        target_language_code: targetLang,
+        speaker: "ritu",
+        model: "bulbul:v3"
+      })
+    }, 8000);
+
+    if (response.ok) {
+      const data: any = await response.json();
+      if (data && data.audios && data.audios[0]) {
+        const audioBase64 = data.audios[0];
+        const dataURI = `data:audio/wav;base64,${audioBase64}`;
+        
+        try {
+          if (process.env.CLOUDINARY_URL || process.env.CLOUDINARY_CLOUD_NAME) {
+            const uploadRes = await cloudinary.uploader.upload(dataURI, {
+              resource_type: "video",
+              folder: "voxassist_voice_cache"
+            });
+            if (uploadRes && uploadRes.secure_url) {
+              return uploadRes.secure_url;
+            }
+          }
+        } catch (cErr: any) {
+          console.warn("Cloudinary audio upload notice:", cErr?.message);
+        }
+        return dataURI;
+      }
+    }
+  } catch (err: any) {
+    console.warn("TTS audio generation error:", err?.message);
+  }
+  return null;
+}
+
+// API: Chat with Assistant (Grounding on recognized knowledge base & zero-delay QA cache)
 app.post("/api/chat", async (req, res) => {
   const { message, context, language, profile, history } = req.body;
+  if (!message || !message.trim()) {
+    return res.status(400).json({ error: "Message is required" });
+  }
+
+  const queryText = message.trim();
+  const targetLang = language || "English";
+
+  // 1. Check Turso DB qa_cache for pre-computed / cached intent answers
+  try {
+    const turso = getTurso();
+    if (turso) {
+      const cacheRes = await turso.execute({
+        sql: "SELECT * FROM qa_cache WHERE language = ? ORDER BY created_at DESC LIMIT 40",
+        args: [targetLang]
+      });
+
+      if (cacheRes && cacheRes.rows && cacheRes.rows.length > 0) {
+        const rows = cacheRes.rows as any[];
+        
+        // Exact normalized string match check
+        const cleanUserQ = queryText.toLowerCase().replace(/[^a-z0-9\u0900-\u097F\u0C80-\u0CFF]/g, '').trim();
+        let matchedRow = rows.find(r => {
+          const cleanQ = String(r.question || '').toLowerCase().replace(/[^a-z0-9\u0900-\u097F\u0C80-\u0CFF]/g, '').trim();
+          return cleanQ === cleanUserQ;
+        });
+
+        // Fast Semantic Intent Check via LLM if exact match not found
+        if (!matchedRow && rows.length > 0) {
+          try {
+            const candidateList = rows.map(r => ({ id: r.id, question: r.question, intent: r.normalized_intent }));
+            const matchPrompt = `You are a strict semantic question intent matching engine.
+USER QUESTION: "${queryText}"
+TARGET LANGUAGE: "${targetLang}"
+CACHED QUESTIONS:
+${JSON.stringify(candidateList)}
+
+STRICT MATCHING RULES:
+1. "What is FSSAI?" and "Tell me about FSSAI" match (same definition intent).
+2. "What is FSSAI?" and "How does FSSAI work?" DO NOT match (different question intent).
+3. "How to register a complaint?" and "I want to file a complaint" match.
+
+Respond ONLY with valid JSON: {"matchId": "<id>"} if matched, or {"matchId": null} if no match.`;
+
+            const intentCheck = await runLLMGeneration({
+              system: matchPrompt,
+              messages: [{ role: 'user', content: 'Check match' }]
+            });
+
+            if (intentCheck) {
+              const cleanJson = intentCheck.replace(/```json/g, '').replace(/```/g, '').trim();
+              const parsed = JSON.parse(cleanJson);
+              if (parsed && parsed.matchId) {
+                matchedRow = rows.find(r => r.id === parsed.matchId);
+              }
+            }
+          } catch (e) {
+            // Intent check fallback
+          }
+        }
+
+        if (matchedRow) {
+          console.log(`[QA Cache Hit] Pre-generated answer used for: "${queryText}" -> Matched: "${matchedRow.question}"`);
+          let audioUrl = matchedRow.audio_url;
+          if (!audioUrl) {
+            audioUrl = await generateTTSAudioUrl(matchedRow.answer, targetLang);
+            if (audioUrl && turso) {
+              turso.execute({
+                sql: "UPDATE qa_cache SET audio_url = ? WHERE id = ?",
+                args: [audioUrl, matchedRow.id]
+              }).catch(() => {});
+            }
+          }
+          return res.json({
+            response: matchedRow.answer,
+            audioUrl: audioUrl || null,
+            cached: true,
+            isComplaintDraft: false
+          });
+        }
+      }
+    }
+  } catch (cacheErr: any) {
+    console.warn("Turso QA cache query notice:", cacheErr?.message);
+  }
 
   try {
     let effectiveContext = context || "";
@@ -608,7 +824,24 @@ INSTRUCTIONS & BEHAVIOR:
     const isComplaintDraft = responseText.includes("COMPLAINT_DRAFT_REQUEST");
     const cleanedText = responseText.replace("COMPLAINT_DRAFT_REQUEST", "").trim();
 
-    res.json({ response: cleanedText, isComplaintDraft });
+    // Generate audio for fast playback & Cloudinary storage
+    const audioUrl = await generateTTSAudioUrl(cleanedText, targetLang);
+
+    // Save newly generated Q&A pair into Turso DB qa_cache
+    try {
+      const turso = getTurso();
+      if (turso && cleanedText && !isComplaintDraft) {
+        const newId = `qa_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+        turso.execute({
+          sql: `INSERT INTO qa_cache (id, normalized_intent, language, question, answer, audio_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          args: [newId, "general_query", targetLang, queryText, cleanedText, audioUrl || "", Date.now()]
+        }).catch(() => {});
+      }
+    } catch (dbSaveErr: any) {
+      console.warn("Save to qa_cache notice:", dbSaveErr?.message);
+    }
+
+    res.json({ response: cleanedText, audioUrl, isComplaintDraft, cached: false });
   } catch (error: any) {
     console.error("Chat error:", error);
     res.status(500).json({ error: error.message || "Failed to process chat" });
@@ -670,6 +903,10 @@ app.post("/api/tts", async (req, res) => {
 // Helper to detect Whisper hallucinations on silent/quiet audio clips
 function isHallucinatedTranscript(text: string): boolean {
   if (!text || !text.trim()) return true;
+  // Reject CJK (Chinese, Japanese, Korean) or Cyrillic characters returned as hallucinations
+  if (/[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af\u0400-\u04FF]/.test(text)) {
+    return true;
+  }
   const clean = text.trim().toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
   const hallucinations = [
     "thank you",
@@ -687,7 +924,11 @@ function isHallucinatedTranscript(text: string): boolean {
     "you",
     "mb",
     "silence",
-    "noise"
+    "noise",
+    "dank u",
+    "untertitel",
+    "moje",
+    "shokran"
   ];
   return hallucinations.includes(clean);
 }

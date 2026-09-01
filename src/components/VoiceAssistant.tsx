@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, Send, AlertCircle, Loader2, Languages, Utensils, Upload, X, Volume2, Sparkles, ChevronDown, ChevronUp, Cpu } from 'lucide-react';
+import { Mic, MicOff, Send, AlertCircle, Loader2, Languages, Utensils, Upload, X, Volume2, VolumeX, Sparkles, ChevronDown, ChevronUp, Cpu } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { VoiceInteraction, UserProfile } from '../types';
 import ParticleBall from './ParticleBall';
@@ -7,6 +7,10 @@ import { transcribeAudioInBrowser } from '../lib/clientWhisper';
 
 function isHallucinatedText(text: string): boolean {
   if (!text || !text.trim()) return true;
+  // Reject CJK (Chinese, Japanese, Korean) or Cyrillic characters returned as hallucinations
+  if (/[\u4e00-\u9fa5\u3040-\u30ff\uac00-\ud7af\u0400-\u04FF]/.test(text)) {
+    return true;
+  }
   const clean = text.trim().toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
   const hallucinations = [
     "thank you",
@@ -24,7 +28,11 @@ function isHallucinatedText(text: string): boolean {
     "you",
     "mb",
     "silence",
-    "noise"
+    "noise",
+    "dank u",
+    "untertitel",
+    "moje",
+    "shokran"
   ];
   return hallucinations.includes(clean);
 }
@@ -63,9 +71,12 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     setIsListening(val);
   };
 
+  const [playingMsgId, setPlayingMsgId] = useState<string | null>(null);
+
   const updateSpeakingState = (val: boolean) => {
     isSpeakingRef.current = val;
     setIsSpeaking(val);
+    if (!val) setPlayingMsgId(null);
   };
 
   const stopSpeaking = () => {
@@ -81,6 +92,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         synthRef.current.cancel();
       } catch {}
     }
+    setPlayingMsgId(null);
     updateSpeakingState(false);
   };
 
@@ -375,10 +387,39 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
   };
 
-  const speak = async (text: string) => {
+  const speak = async (text: string, audioUrl?: string, messageId?: string) => {
     if (!text) return;
 
+    // Toggle Mute: If clicking audio icon of the message that is CURRENTLY PLAYING, mute/stop it immediately!
+    if (isSpeaking && messageId && playingMsgId === messageId) {
+      stopSpeaking();
+      return;
+    }
+
     stopSpeaking();
+    if (messageId) setPlayingMsgId(messageId);
+
+    // 0. ZERO DELAY INSTANT PLAYBACK: Play pre-generated Cloudinary / Sarvam audio URL directly!
+    if (audioUrl) {
+      try {
+        const audio = new Audio(audioUrl);
+        audio.onplay = () => updateSpeakingState(true);
+        audio.onended = () => {
+          updateSpeakingState(false);
+          setPlayingMsgId(null);
+        };
+        audio.onerror = () => {
+          updateSpeakingState(false);
+          setPlayingMsgId(null);
+          fallbackBrowserSpeak(text);
+        };
+        activeAudioRef.current = audio;
+        await audio.play();
+        return;
+      } catch (e) {
+        console.warn("Direct audio URL playback notice:", e);
+      }
+    }
 
     try {
       // 1. Generate natural speech using Sarvam AI TTS
@@ -394,9 +435,13 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         if (data && data.audioBase64) {
           const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
           audio.onplay = () => updateSpeakingState(true);
-          audio.onended = () => updateSpeakingState(false);
+          audio.onended = () => {
+            updateSpeakingState(false);
+            setPlayingMsgId(null);
+          };
           audio.onerror = () => {
             updateSpeakingState(false);
+            setPlayingMsgId(null);
             fallbackBrowserSpeak(text);
           };
           activeAudioRef.current = audio;
@@ -433,20 +478,25 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
     const browserCaptured = transcriptRef.current.trim();
     
-    // Always call the high-quality backend STT (Saaras v4 / Groq Whisper) first for superior accuracy
+    // 1ST PRIORITY: Free native Browser Web Speech API (Chrome/Edge/Safari/Android)
+    if (browserCaptured && !isHallucinatedText(browserCaptured)) {
+      setTranscript(browserCaptured);
+      transcriptRef.current = '';
+      handleSendMessage(browserCaptured);
+      // Clean up media recorder state safely in background
+      stopAndTranscribeAudio().catch(() => {});
+      return;
+    }
+
+    // 2ND PRIORITY: Multi-tier Backend STT (Sarvam AI Saaras -> Gemini Flash -> Groq Whisper)
     setIsLoading(true);
     const serverText = await stopAndTranscribeAudio();
     setIsLoading(false);
 
-    if (serverText && serverText.trim() && !isHallucinatedText(serverText)) {
+    if (serverText && serverText.trim() && !isHallucinatedText(serverText.trim())) {
       setTranscript(serverText.trim());
       transcriptRef.current = '';
       handleSendMessage(serverText.trim());
-    } else if (browserCaptured && !isHallucinatedText(browserCaptured)) {
-      // Fallback to browser's native text if backend returned empty
-      setTranscript(browserCaptured);
-      transcriptRef.current = '';
-      handleSendMessage(browserCaptured);
     } else {
       setTranscript('');
       transcriptRef.current = '';
@@ -567,11 +617,12 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         id: (Date.now() + 1).toString(), 
         text: assistantReply, 
         sender: 'assistant', 
-        timestamp: Date.now() 
+        timestamp: Date.now(),
+        audioUrl: data.audioUrl || undefined
       };
       
       setMessages(prev => [...prev, assistantMsg]);
-      speak(assistantReply);
+      speak(assistantReply, data.audioUrl, assistantMsg.id);
 
       // Detect if AI suggested a complaint
       if (data.isComplaintDraft) {
@@ -860,11 +911,28 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                       <p className="text-xs sm:text-sm font-medium leading-relaxed">{m.text}</p>
                       {m.sender === 'assistant' && (
                         <button 
-                          onClick={() => speak(m.text)}
-                          className="text-indigo-400 hover:text-indigo-600 p-1 rounded-lg shrink-0 transition-colors"
-                          title="Replay Voice"
+                          onClick={() => {
+                            if (isSpeaking && playingMsgId === m.id) {
+                              stopSpeaking();
+                            } else {
+                              speak(m.text, m.audioUrl, m.id);
+                            }
+                          }}
+                          className={`p-1.5 rounded-xl transition-all shrink-0 flex items-center gap-1 font-bold text-[10px] ${
+                            isSpeaking && playingMsgId === m.id
+                              ? 'bg-rose-100 text-rose-700 border border-rose-300 animate-pulse shadow-xs'
+                              : 'text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50'
+                          }`}
+                          title={isSpeaking && playingMsgId === m.id ? "Mute / Stop Audio" : "Play Voice Answer"}
                         >
-                          <Volume2 size={15} />
+                          {isSpeaking && playingMsgId === m.id ? (
+                            <>
+                              <VolumeX size={15} className="text-rose-600" />
+                              <span>Mute</span>
+                            </>
+                          ) : (
+                            <Volume2 size={15} />
+                          )}
                         </button>
                       )}
                     </div>

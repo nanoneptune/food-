@@ -26,6 +26,7 @@ export interface VoiceInteraction {
   text: string;
   sender: 'user' | 'assistant';
   timestamp: number;
+  audioUrl?: string;
 }
 
 export interface UserProfile {
