@@ -1,0 +1,32 @@
+{
+  "background_color": "#ffffff",
+  "description": "An AI voice assistant supporting Kannada, Hindi, and English. Upload documents to build a knowledge base, ask questions via voice, and track complaints.",
+  "dir": "ltr",
+  "display": "standalone",
+  "name": "VoxAssist AI Voice Assistant",
+  "orientation": "any",
+  "scope": "/",
+  "short_name": "VoxAssist",
+  "start_url": "/",
+  "theme_color": "#4f46e5",
+  "icons": [
+    {
+      "src": "https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png",
+      "type": "image/png",
+      "sizes": "467x534"
+    },
+    {
+      "src": "https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png",
+      "type": "image/png",
+      "sizes": "192x192",
+      "purpose": "any maskable"
+    }
+  ],
+  "id": "vox"
+}

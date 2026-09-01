@@ -3,16 +3,48 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function() {
+        try {
+          var _fetch = window.fetch ? window.fetch.bind(window) : null;
+          Object.defineProperty(window, 'fetch', {
+            get: function() { return _fetch; },
+            set: function(fn) { _fetch = fn; },
+            configurable: true,
+            enumerable: true
+          });
+        } catch (e) {
+          console.warn('Fetch shim init:', e);
+        }
+      })();
+    </script>
     <link rel="icon" type="image/png" href="https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png" />
     <link rel="apple-touch-icon" href="https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png" />
-    <title>Polyglot Voice Assistant</title>
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#4f46e5" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="VoxAssist" />
+    <title>VoxAssist AI Voice Assistant</title>
     <meta name="description" content="An AI voice assistant supporting Kannada, Hindi, and English. Upload documents to build a knowledge base, ask questions via voice, and track complaints." />
-    <meta property="og:title" content="Polyglot Voice Assistant" />
+    <meta property="og:title" content="VoxAssist AI Voice Assistant" />
     <meta property="og:description" content="An AI voice assistant supporting Kannada, Hindi, and English. Upload documents to build a knowledge base, ask questions via voice, and track complaints." />
     <meta property="og:image" content="https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png" />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:image" content="https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png" />
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function() {
+          navigator.serviceWorker.register('/sw.js').then(function(reg) {
+            console.log('VoxAssist PWA Service Worker registered:', reg.scope);
+          }).catch(function(err) {
+            console.warn('Service Worker registration failed:', err);
+          });
+        });
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>

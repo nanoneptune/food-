@@ -1,5 +1,5 @@
 {
-  "name": "Polyglot Voice Assistant",
+  "name": "VoxAssist AI Voice Assistant",
   "description": "An AI voice assistant supporting Kannada, Hindi, and English. Upload documents to build a knowledge base, ask questions via voice, and track complaints.",
   "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

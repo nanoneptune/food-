@@ -1,8 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, Send, AlertCircle, Loader2, Languages, Utensils, Upload, X, Volume2, Sparkles } from 'lucide-react';
+import { Mic, MicOff, Send, AlertCircle, Loader2, Languages, Utensils, Upload, X, Volume2, Sparkles, ChevronDown, ChevronUp } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { VoiceInteraction, UserProfile } from '../types';
 import ParticleBall from './ParticleBall';
+
+function isHallucinatedText(text: string): boolean {
+  if (!text || !text.trim()) return true;
+  const clean = text.trim().toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  const hallucinations = [
+    "thank you",
+    "thank you very much",
+    "thank you so much",
+    "thank you for watching",
+    "thanks for watching",
+    "thanks",
+    "subtitles by amara org",
+    "subtitles by amaraorg",
+    "subtitles by",
+    "amara org",
+    "bye",
+    "subscribe",
+    "you",
+    "mb",
+    "silence",
+    "noise"
+  ];
+  return hallucinations.includes(clean);
+}
 
 export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const [isListening, setIsListening] = useState(false);
@@ -17,6 +41,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
   const mediaInputRef = useRef<HTMLInputElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
   
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(typeof window !== 'undefined' ? window.speechSynthesis : null);
@@ -24,52 +49,113 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const audioChunksRef = useRef<Blob[]>([]);
   const transcriptRef = useRef<string>('');
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const silenceTimerRef = useRef<any>(null);
+  const isListeningRef = useRef<boolean>(false);
+  const isSpeakingRef = useRef<boolean>(false);
+
+  const updateListeningState = (val: boolean) => {
+    isListeningRef.current = val;
+    setIsListening(val);
+  };
+
+  const updateSpeakingState = (val: boolean) => {
+    isSpeakingRef.current = val;
+    setIsSpeaking(val);
+  };
+
+  const stopSpeaking = () => {
+    if (activeAudioRef.current) {
+      try {
+        activeAudioRef.current.pause();
+        activeAudioRef.current.currentTime = 0;
+        activeAudioRef.current = null;
+      } catch {}
+    }
+    if (synthRef.current) {
+      try {
+        synthRef.current.cancel();
+      } catch {}
+    }
+    updateSpeakingState(false);
+  };
+
+  // Auto-scroll chat stream to bottom whenever messages or loading state changes
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isLoading, transcript]);
 
   const startRecording = async () => {
     try {
+      if (micStream) {
+        micStream.getTracks().forEach(track => track.stop());
+      }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       setMicStream(stream);
-      mediaRecorderRef.current = new MediaRecorder(stream);
+      
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') 
+        ? 'audio/webm;codecs=opus' 
+        : MediaRecorder.isTypeSupported('audio/webm') 
+          ? 'audio/webm' 
+          : 'audio/mp4';
+      
+      const recorder = new MediaRecorder(stream, { mimeType });
+      mediaRecorderRef.current = recorder;
       audioChunksRef.current = [];
-      mediaRecorderRef.current.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
+      
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
       };
-      mediaRecorderRef.current.start();
+      
+      recorder.start(200); // 200ms timeslice
       setMicError(null);
-    } catch (e) { 
-      console.warn("Microphone media recorder error:", e);
-      setMicError("Microphone permission was denied. You can also type your message below.");
+    } catch (e: any) { 
+      console.warn("Microphone access error:", e);
+      setMicError("Microphone access is unavailable or blocked. Please check browser permissions or type your question below.");
     }
   };
 
   const stopAndTranscribeAudio = async (): Promise<string | null> => {
     return new Promise((resolve) => {
-      if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state === 'inactive') {
         return resolve(null);
       }
-      mediaRecorderRef.current.onstop = async () => {
-        if (audioChunksRef.current.length === 0) return resolve(null);
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const formData = new FormData();
-        formData.append('audio', audioBlob, 'speech.webm');
-        formData.append('language', language);
 
+      recorder.onstop = async () => {
+        if (audioChunksRef.current.length === 0) return resolve(null);
+        
         try {
+          const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
+          if (audioBlob.size < 500) {
+            return resolve(null); // Too short to be voice
+          }
+
+          const formData = new FormData();
+          formData.append('audio', audioBlob, 'speech.webm');
+          formData.append('language', language);
+
           const res = await fetch('/api/stt', { method: 'POST', body: formData });
-          const data = await res.json();
-          if (res.ok && data.transcript) {
-            resolve(data.transcript);
+          const contentType = res.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            const data = await res.json();
+            if (res.ok && data.transcript && data.transcript.trim()) {
+              resolve(data.transcript.trim());
+            } else {
+              resolve(null);
+            }
           } else {
             resolve(null);
           }
         } catch (e) {
-          console.warn("Sarvam STT error:", e);
+          console.warn("STT transcription notice:", e);
           resolve(null);
         }
       };
 
       try {
-        mediaRecorderRef.current.stop();
+        recorder.stop();
       } catch {
         resolve(null);
       }
@@ -78,13 +164,14 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
   const stopAndUploadAudio = async (): Promise<string | undefined> => {
     return new Promise((resolve) => {
-      if (!mediaRecorderRef.current || mediaRecorderRef.current.state === 'inactive') {
+      const recorder = mediaRecorderRef.current;
+      if (!recorder || recorder.state === 'inactive') {
         return resolve(undefined);
       }
       
-      mediaRecorderRef.current.onstop = async () => {
+      recorder.onstop = async () => {
         if (audioChunksRef.current.length === 0) return resolve(undefined);
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || 'audio/webm' });
         const formData = new FormData();
         formData.append('file', audioBlob);
         try {
@@ -96,7 +183,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         }
       };
       try {
-        mediaRecorderRef.current.stop();
+        recorder.stop();
       } catch {
         resolve(undefined);
       }
@@ -123,7 +210,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         else recognition.lang = 'en-US';
 
         recognition.onstart = () => {
-          setIsListening(true);
+          updateListeningState(true);
           setMicError(null);
         };
 
@@ -133,31 +220,36 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             const piece = event.results[i][0].transcript;
             interimTranscript += piece;
           }
-          transcriptRef.current = interimTranscript;
-          setTranscript(interimTranscript);
+          if (interimTranscript.trim()) {
+            transcriptRef.current = interimTranscript;
+            setTranscript(interimTranscript);
+
+            // User barge-in: If user speaks while AI audio is active, stop AI speech immediately
+            if (isSpeakingRef.current || activeAudioRef.current) {
+              stopSpeaking();
+            }
+
+            // Auto Silence Detection: After 2.5s of no new spoken words, automatically finish & send!
+            if (silenceTimerRef.current) {
+              clearTimeout(silenceTimerRef.current);
+            }
+            silenceTimerRef.current = setTimeout(() => {
+              stopListeningAndSend();
+            }, 2500);
+          }
         };
 
         recognition.onerror = (event: any) => {
-          console.warn('Speech recognition error event:', event.error);
+          console.warn('Browser speech recognition notice:', event.error);
           if (event.error === 'not-allowed') {
-            setMicError("Microphone access was blocked. Please enable microphone permissions in your browser bar.");
+            setMicError("Microphone access blocked in browser. Please enable permissions.");
           }
-          setIsListening(false);
         };
 
         recognition.onend = async () => {
-          setIsListening(false);
           const capturedText = transcriptRef.current?.trim();
-          if (capturedText) {
-            handleSendMessage(capturedText);
-            transcriptRef.current = '';
-          } else {
-            // Use Sarvam AI STT if browser speech recognition failed to capture
-            const sarvamTranscript = await stopAndTranscribeAudio();
-            if (sarvamTranscript && sarvamTranscript.trim()) {
-              setTranscript(sarvamTranscript.trim());
-              handleSendMessage(sarvamTranscript.trim());
-            }
+          if (capturedText && isListeningRef.current) {
+            stopListeningAndSend();
           }
         };
 
@@ -182,31 +274,20 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       else if (language === 'Kannada') utterance.lang = 'kn-IN';
       else utterance.lang = 'en-US';
 
-      utterance.onstart = () => setIsSpeaking(true);
-      utterance.onend = () => setIsSpeaking(false);
-      utterance.onerror = () => setIsSpeaking(false);
+      utterance.onstart = () => updateSpeakingState(true);
+      utterance.onend = () => updateSpeakingState(false);
+      utterance.onerror = () => updateSpeakingState(false);
       synthRef.current.speak(utterance);
     } catch (e) {
       console.warn("Browser synthesis error:", e);
-      setIsSpeaking(false);
+      updateSpeakingState(false);
     }
   };
 
   const speak = async (text: string) => {
     if (!text) return;
 
-    // Stop current audio if playing
-    if (activeAudioRef.current) {
-      try {
-        activeAudioRef.current.pause();
-        activeAudioRef.current = null;
-      } catch {}
-    }
-    if (synthRef.current) {
-      try {
-        synthRef.current.cancel();
-      } catch {}
-    }
+    stopSpeaking();
 
     try {
       // 1. Generate natural speech using Sarvam AI TTS
@@ -216,59 +297,97 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         body: JSON.stringify({ text, language })
       });
 
-      const data = await res.json();
-      if (res.ok && data.audioBase64) {
-        const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
-        audio.onplay = () => setIsSpeaking(true);
-        audio.onended = () => setIsSpeaking(false);
-        audio.onerror = () => {
-          setIsSpeaking(false);
-          fallbackBrowserSpeak(text);
-        };
-        activeAudioRef.current = audio;
-        await audio.play();
-        return;
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
+        const data = await res.json();
+        if (data && data.audioBase64) {
+          const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
+          audio.onplay = () => updateSpeakingState(true);
+          audio.onended = () => updateSpeakingState(false);
+          audio.onerror = () => {
+            updateSpeakingState(false);
+            fallbackBrowserSpeak(text);
+          };
+          activeAudioRef.current = audio;
+          await audio.play();
+          return;
+        }
       }
     } catch (err) {
-      console.warn("Sarvam TTS request failed, using browser speech:", err);
+      console.warn("Sarvam TTS request notice (using browser speech fallback):", err);
     }
 
     // 2. Fallback to browser SpeechSynthesis
     fallbackBrowserSpeak(text);
   };
 
-  const toggleListening = async () => {
-    if (isListening) {
-      try {
-        recognitionRef.current?.stop();
-      } catch (e) {
-        console.warn(e);
-      }
-      setIsListening(false);
+  const stopListeningAndSend = async () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    updateListeningState(false);
 
-      // If recognition didn't auto-handle onend, ensure Sarvam STT gets transcribed
-      setTimeout(async () => {
-        if (!transcriptRef.current.trim()) {
-          const sarvamText = await stopAndTranscribeAudio();
-          if (sarvamText && sarvamText.trim()) {
-            setTranscript(sarvamText.trim());
-            handleSendMessage(sarvamText.trim());
-          }
-        }
-      }, 250);
+    try {
+      recognitionRef.current?.stop();
+    } catch (e) {
+      console.warn(e);
+    }
+
+    const browserCaptured = transcriptRef.current.trim();
+    
+    // Always call the high-quality backend STT (Saaras v4 / Groq Whisper) first for superior accuracy
+    setIsLoading(true);
+    const serverText = await stopAndTranscribeAudio();
+    setIsLoading(false);
+
+    if (serverText && serverText.trim() && !isHallucinatedText(serverText)) {
+      setTranscript(serverText.trim());
+      transcriptRef.current = '';
+      handleSendMessage(serverText.trim());
+    } else if (browserCaptured && !isHallucinatedText(browserCaptured)) {
+      // Fallback to browser's native text if backend returned empty
+      setTranscript(browserCaptured);
+      transcriptRef.current = '';
+      handleSendMessage(browserCaptured);
     } else {
       setTranscript('');
       transcriptRef.current = '';
-      try {
-        recognitionRef.current?.start();
-        setIsListening(true);
-        startRecording();
-      } catch (e) {
-        console.warn("Recognition start failed, using MediaRecorder with Sarvam AI STT:", e);
-        setIsListening(true);
-        startRecording();
-      }
     }
+  };
+
+  const startListeningProcess = async () => {
+    stopSpeaking();
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    setTranscript('');
+    transcriptRef.current = '';
+    updateListeningState(true);
+    await startRecording();
+    try {
+      recognitionRef.current?.start();
+    } catch (e) {
+      console.warn("Native recognition start notice (falling back cleanly to audio recorder):", e);
+    }
+  };
+
+  const toggleListening = async () => {
+    // 1. If AI is speaking -> INTERRUPT! Stop speech immediately and start listening to user
+    if (isSpeakingRef.current || isSpeaking || activeAudioRef.current) {
+      await startListeningProcess();
+      return;
+    }
+
+    // 2. If listening -> User clicked mic again to stop! Stop listening & send immediately
+    if (isListeningRef.current || isListening) {
+      await stopListeningAndSend();
+      return;
+    }
+
+    // 3. Otherwise -> Start listening
+    await startListeningProcess();
   };
 
   const handleMediaUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -317,18 +436,31 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       return;
     }
 
+    const recentHistory = messages.slice(-8).map(m => ({
+      role: m.sender === 'user' ? 'user' : 'assistant',
+      content: m.text
+    }));
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           message: queryText, 
+          history: recentHistory,
           language, 
           profile 
         })
       });
 
-      const data = await res.json();
+      let data: any = {};
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        data = await res.json();
+      } else {
+        throw new Error('Server returned non-JSON response');
+      }
+
       if (!res.ok || data.error) {
         throw new Error(data.error || 'Server failed to respond');
       }
@@ -350,9 +482,16 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       }
     } catch (error: any) { 
       console.error("Chat error:", error);
+      let errorText = "I'm having trouble connecting to the AI service. Please verify your API key (GEMINI_API_KEY / GROQ_API_KEY) in Vercel environment settings.";
+      if (language === 'Kannada' || language === 'kn-IN') {
+        errorText = "ಸಂಪರ್ಕಿಸುವಲ್ಲಿ ಸಮಸ್ಯೆ ಉಂಟಾಗಿದೆ. ದಯವಿಟ್ಟು Vercel ಪರಿರಚನೆಯಲ್ಲಿ ನಿಮ್ಮ API ಕೀಲಿಯನ್ನು (GEMINI_API_KEY) ಪರಿಶೀಲಿಸಿ.";
+      } else if (language === 'Hindi' || language === 'hi-IN') {
+        errorText = "कनेक्ट करने में समस्या आ रही है। कृपया Vercel सेटिंग्स में अपनी API कुंजी (GEMINI_API_KEY) की जाँच करें।";
+      }
+
       const fallbackMsg: VoiceInteraction = {
         id: (Date.now() + 1).toString(),
-        text: "I'm having trouble connecting right now. Please verify your connection or API key settings.",
+        text: errorText,
         sender: 'assistant',
         timestamp: Date.now()
       };
@@ -412,163 +551,266 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
   };
 
+  const hasMessages = messages.length > 0;
+  const [isMinimized, setIsMinimized] = useState(false);
+
+  // If user sends a new message while minimized, un-minimize automatically
+  const showFullChat = hasMessages && !isMinimized;
+
   return (
     <motion.div 
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="px-6 flex flex-col items-center min-h-[80vh]"
+      className="flex flex-col h-[calc(100vh-8rem)] max-w-lg mx-auto relative px-3 sm:px-4"
     >
-      <div className="w-full max-w-lg space-y-6">
-        {/* Language Switcher Bar */}
-        <div className="flex justify-center gap-2 p-1.5 bg-white/70 backdrop-blur-xl rounded-2xl border border-slate-100 shadow-sm w-fit mx-auto">
-          {(['English', 'Hindi', 'Kannada'] as const).map((lang) => (
-            <button
-              key={lang}
-              onClick={() => {
-                setLanguage(lang);
-                if (synthRef.current) synthRef.current.cancel();
-              }}
-              className={`px-4 py-2 rounded-xl text-[11px] font-bold tracking-wide transition-all ${
-                language === lang 
-                  ? 'bg-indigo-600 text-white shadow-md shadow-indigo-200' 
-                  : 'text-slate-500 hover:text-slate-800 hover:bg-slate-100'
-              }`}
-            >
-              {lang === 'Kannada' ? 'ಕನ್ನಡ' : lang === 'Hindi' ? 'हिन्दी' : 'English'}
-            </button>
-          ))}
-        </div>
-
-        {/* Mic Error Notice */}
-        {micError && (
-          <div className="bg-rose-50 border border-rose-200 text-rose-800 p-3.5 rounded-2xl flex items-start gap-2.5 text-xs">
-            <AlertCircle size={16} className="text-rose-500 shrink-0 mt-0.5" />
-            <div className="flex-1">
-              <p className="font-semibold">{micError}</p>
-            </div>
-            <button onClick={() => setMicError(null)} className="text-rose-400 hover:text-rose-600">
-              <X size={14} />
-            </button>
-          </div>
-        )}
-
-        {/* 3D Sphere Voice Orb */}
-        <div className="relative flex flex-col items-center justify-center py-4">
-          <ParticleBall
-            isListening={isListening}
-            isSpeaking={isSpeaking}
-            isLoading={isLoading}
-            onClick={toggleListening}
-            audioStream={micStream}
-          />
-
-          <div className="mt-6 text-center max-w-sm">
-            <h2 className="text-xl font-bold text-slate-900 tracking-tight">
-              {isListening ? "Listening to your voice..." : isSpeaking ? "Speaking answer..." : isLoading ? "Thinking..." : "How can I help you today?"}
-            </h2>
-            <div className="mt-2 min-h-6">
-              <AnimatePresence mode="wait">
-                <motion.p 
-                  key={transcript || (isListening ? 'listening' : 'idle')}
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="text-indigo-600 font-bold text-xs tracking-wide px-4"
-                >
-                  {transcript || (
-                    isListening 
-                      ? "Listening... Speak now" 
-                      : (language === 'Kannada' ? "ಧ್ವನಿ ಮೂಲಕ ಮಾತನಾಡಲು ಗೋಳವನ್ನು ಟ್ಯಾಪ್ ಮಾಡಿ" : language === 'Hindi' ? "बोलने के लिए गोले पर टैप करें" : "Tap the sphere or type below to talk")
-                  )}
-                </motion.p>
-              </AnimatePresence>
-            </div>
-          </div>
-        </div>
-
-        {/* Text Input Fallback Bar */}
-        <form 
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSendMessage(manualText);
-          }}
-          className="flex items-center gap-2 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm"
-        >
-          <input
-            type="text"
-            placeholder={language === 'Kannada' ? "ಇಲ್ಲಿ ಸಂದೇಶ ಟೈಪ್ ಮಾಡಿ..." : language === 'Hindi' ? "यहाँ अपना प्रश्न टाइप करें..." : "Or type your food query or complaint..."}
-            value={manualText}
-            onChange={(e) => setManualText(e.target.value)}
-            className="flex-1 bg-transparent px-3 py-2 text-xs text-slate-800 placeholder-slate-400 focus:outline-none font-medium"
-          />
-          <button
-            type="submit"
-            disabled={!manualText.trim() || isLoading}
-            className="p-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl transition-all disabled:opacity-40 active:scale-95 shadow-sm"
-          >
-            <Send size={15} />
+      {/* Mic Error Banner */}
+      {micError && (
+        <div className="shrink-0 mb-2 bg-rose-50 border border-rose-200 text-rose-800 p-2.5 rounded-2xl flex items-start gap-2 text-xs shadow-sm z-30">
+          <AlertCircle size={15} className="text-rose-500 shrink-0 mt-0.5" />
+          <div className="flex-1 font-semibold">{micError}</div>
+          <button onClick={() => setMicError(null)} className="text-rose-400 hover:text-rose-600">
+            <X size={14} />
           </button>
-        </form>
-
-        {/* Dialogue Stream */}
-        <div className="space-y-4 max-h-[35vh] overflow-y-auto pr-2 custom-scrollbar flex flex-col pb-4">
-          <AnimatePresence initial={false}>
-            {messages.map((m) => (
-              <motion.div
-                key={m.id}
-                initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                className={`p-4 rounded-3xl max-w-[88%] ${
-                  m.sender === 'user' 
-                  ? 'bg-indigo-600 text-white self-end shadow-md shadow-indigo-100' 
-                  : 'bg-white text-slate-800 self-start border border-slate-100 shadow-sm'
-                }`}
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <p className="text-xs font-medium leading-relaxed">{m.text}</p>
-                  {m.sender === 'assistant' && (
-                    <button 
-                      onClick={() => speak(m.text)}
-                      className="text-indigo-400 hover:text-indigo-600 p-1 rounded-lg shrink-0 transition-colors"
-                      title="Replay Voice"
-                    >
-                      <Volume2 size={14} />
-                    </button>
-                  )}
-                </div>
-                <div className={`text-[9px] font-bold uppercase tracking-wider mt-2 opacity-60 ${m.sender === 'user' ? 'text-right text-indigo-100' : 'text-left text-slate-400'}`}>
-                  {m.sender === 'user' ? (profile.name || 'You') : 'VoxAssist AI'} • {new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-
-          {isLoading && (
-            <div className="flex items-center gap-2.5 bg-white w-fit px-4 py-2.5 rounded-2xl border border-slate-100 shadow-sm text-indigo-600">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              <span className="text-[11px] font-bold uppercase tracking-wider">Generating answer...</span>
-            </div>
-          )}
         </div>
+      )}
 
-        {/* Complaint Drafting Media Support */}
+      <AnimatePresence mode="wait">
+        {!showFullChat ? (
+          /* ========================================================
+             1. MAIN LANDING PAGE: Big 3D Sphere in Middle & assist heading
+             ======================================================== */
+          <motion.div
+            key="landing-orb"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            transition={{ duration: 0.3 }}
+            className="flex-1 flex flex-col items-center justify-between py-2 min-h-0"
+          >
+            {/* Top Language Switcher Bar */}
+            <div className="shrink-0 flex justify-center gap-1.5 p-1 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 shadow-sm w-fit mx-auto mt-1">
+              {(['English', 'Hindi', 'Kannada'] as const).map((lang) => {
+                const labelMap = { English: 'English', Hindi: 'हिन्दी', Kannada: 'ಕನ್ನಡ' };
+                return (
+                  <button
+                    key={lang}
+                    onClick={() => {
+                      setLanguage(lang);
+                      if (synthRef.current) synthRef.current.cancel();
+                    }}
+                    className={`px-3.5 py-1.5 rounded-xl text-[11px] font-bold tracking-wide transition-all ${
+                      language === lang 
+                        ? 'bg-indigo-600 text-white shadow-md shadow-indigo-200' 
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                    }`}
+                  >
+                    {labelMap[lang]}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Middle Big 3D Sphere */}
+            <div className="flex-1 flex flex-col items-center justify-center py-4 space-y-4">
+              <ParticleBall
+                isListening={isListening}
+                isSpeaking={isSpeaking}
+                isLoading={isLoading}
+                onClick={toggleListening}
+                audioStream={micStream}
+                compact={false}
+              />
+
+              <div className="text-center max-w-sm px-2">
+                <h2 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight">
+                  {isListening 
+                    ? "Listening to your voice..." 
+                    : isSpeaking 
+                    ? "Speaking answer..." 
+                    : isLoading 
+                    ? "Thinking..." 
+                    : "How can I help you today?"}
+                </h2>
+                <div className="mt-1 min-h-5">
+                  <AnimatePresence mode="wait">
+                    <motion.p 
+                      key={transcript || (isListening ? 'listening' : 'idle')}
+                      initial={{ opacity: 0, y: 4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="text-indigo-600 font-bold text-xs tracking-wide px-2"
+                    >
+                      {transcript || (
+                        isListening 
+                          ? "Listening... Speak your query clearly" 
+                          : (language === 'Kannada' 
+                              ? "ಧ್ವನಿ ಮೂಲಕ ಮಾತನಾಡಲು ಗೋಳವನ್ನು ಟ್ಯಾಪ್ ಮಾಡಿ" 
+                              : language === 'Hindi' 
+                              ? "बोलने के लिए गोले पर टैप करें" 
+                              : "Tap sphere above or type below to send message")
+                      )}
+                    </motion.p>
+                  </AnimatePresence>
+                </div>
+              </div>
+            </div>
+
+            {/* If there are existing messages and user minimized, show toggle to re-open chat */}
+            {hasMessages && (
+              <button
+                onClick={() => setIsMinimized(false)}
+                className="shrink-0 mb-1 px-4 py-1.5 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all"
+              >
+                <span>View Chat History ({messages.length})</span>
+                <ChevronUp size={14} />
+              </button>
+            )}
+          </motion.div>
+        ) : (
+          /* ========================================================
+             2. FULL CHAT STREAM: Expands and Fills Page on message send
+             ======================================================== */
+          <motion.div
+            key="chat-full"
+            initial={{ opacity: 0, y: 15 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 15 }}
+            transition={{ duration: 0.3 }}
+            className="flex-1 flex flex-col min-h-0"
+          >
+            {/* Top Compact Header: Small Sphere + Clear Eng/Hi/Kan + Corner Minimize Button */}
+            <div className="shrink-0 flex items-center justify-between gap-2 p-2 bg-white/95 backdrop-blur-xl rounded-2xl border border-slate-200/90 shadow-sm z-10 mb-1">
+              <div className="flex items-center gap-2">
+                <ParticleBall
+                  isListening={isListening}
+                  isSpeaking={isSpeaking}
+                  isLoading={isLoading}
+                  onClick={toggleListening}
+                  audioStream={micStream}
+                  compact={true}
+                />
+                <div>
+                  <h3 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                    <span>VoxAssist AI</span>
+                    {isListening && <span className="w-2 h-2 rounded-full bg-red-500 animate-ping inline-block" />}
+                  </h3>
+                  <p className="text-[10px] text-indigo-600 font-bold truncate max-w-[110px] sm:max-w-[150px]">
+                    {transcript || (
+                      isListening 
+                        ? "Listening..." 
+                        : isSpeaking 
+                        ? "Speaking..." 
+                        : isLoading 
+                        ? "Thinking..." 
+                        : "Active Chat"
+                    )}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {/* Clear Eng | Hi | Kan Language Switcher */}
+                <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-xl border border-slate-200/60">
+                  {(['English', 'Hindi', 'Kannada'] as const).map((lang) => {
+                    const labelMap = { English: 'Eng', Hindi: 'Hi', Kannada: 'Kan' };
+                    return (
+                      <button
+                        key={lang}
+                        onClick={() => {
+                          setLanguage(lang);
+                          if (synthRef.current) synthRef.current.cancel();
+                        }}
+                        className={`px-2 py-1 rounded-lg text-[10px] sm:text-xs font-bold transition-all ${
+                          language === lang 
+                            ? 'bg-indigo-600 text-white shadow-xs' 
+                            : 'text-slate-600 hover:text-slate-900 hover:bg-white'
+                        }`}
+                        title={`Switch to ${lang}`}
+                      >
+                        {labelMap[lang]}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Corner Minimize Button */}
+                <button
+                  onClick={() => setIsMinimized(true)}
+                  className="p-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 transition-colors border border-slate-200"
+                  title="Minimize chat to main sphere"
+                >
+                  <ChevronDown size={16} />
+                </button>
+              </div>
+            </div>
+
+            {/* Main Full Chat Stream Container */}
+            <div className="flex-1 overflow-y-auto py-2 space-y-3 custom-scrollbar flex flex-col pr-1 min-h-0 my-1">
+              <AnimatePresence initial={false}>
+                {messages.map((m) => (
+                  <motion.div
+                    key={m.id}
+                    initial={{ opacity: 0, y: 14, scale: 0.96 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    transition={{ duration: 0.25, ease: 'easeOut' }}
+                    className={`p-3.5 rounded-2xl max-w-[88%] shadow-sm ${
+                      m.sender === 'user' 
+                      ? 'bg-indigo-600 text-white self-end shadow-indigo-100 rounded-br-xs' 
+                      : 'bg-white text-slate-800 self-start border border-slate-200/80 rounded-bl-xs'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="text-xs sm:text-sm font-medium leading-relaxed">{m.text}</p>
+                      {m.sender === 'assistant' && (
+                        <button 
+                          onClick={() => speak(m.text)}
+                          className="text-indigo-400 hover:text-indigo-600 p-1 rounded-lg shrink-0 transition-colors"
+                          title="Replay Voice"
+                        >
+                          <Volume2 size={15} />
+                        </button>
+                      )}
+                    </div>
+                    <div className={`text-[9px] font-bold uppercase tracking-wider mt-1.5 opacity-60 ${m.sender === 'user' ? 'text-right text-indigo-100' : 'text-left text-slate-400'}`}>
+                      {m.sender === 'user' ? (profile.name || 'You') : 'VoxAssist AI'} • {new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+
+              {isLoading && (
+                <div className="flex items-center gap-2 bg-white w-fit px-3.5 py-2.5 rounded-2xl border border-slate-200 shadow-sm text-indigo-600 self-start">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span className="text-[11px] font-bold uppercase tracking-wider">Generating answer...</span>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* STICKY BOTTOM CHAT INPUT BAR: High-contrast, ultra-visible while typing */}
+      <div className="shrink-0 sticky bottom-0 bg-slate-50/95 backdrop-blur-md pt-2 pb-1 space-y-2 border-t border-slate-200/80 z-20">
+        {/* Complaint Drafting Box */}
         {complaintDraft && (
           <motion.div 
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="bg-amber-50/80 border border-amber-200 p-5 rounded-3xl space-y-3 shadow-sm"
+            className="bg-amber-50 border-2 border-amber-300 p-3 rounded-2xl space-y-2 shadow-md"
           >
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <AlertCircle size={16} className="text-amber-600" />
                 <p className="text-xs font-bold text-amber-900 uppercase tracking-wide">Issue Report Drafted</p>
               </div>
               <button 
                 onClick={() => mediaInputRef.current?.click()}
                 disabled={isUploadingMedia}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-white text-amber-800 border border-amber-200 rounded-xl text-[10px] font-bold uppercase tracking-wider shadow-sm hover:bg-amber-50"
+                className="flex items-center gap-1.5 px-2.5 py-1 bg-white text-amber-800 border border-amber-300 rounded-lg text-[10px] font-bold uppercase tracking-wider shadow-sm hover:bg-amber-50"
               >
-                {isUploadingMedia ? <Loader2 className="animate-spin" size={13} /> : <Upload size={13} />} 
+                {isUploadingMedia ? <Loader2 className="animate-spin" size={12} /> : <Upload size={12} />} 
                 Add Photos
               </button>
               <input 
@@ -584,27 +826,27 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             {complaintDraft.media.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {complaintDraft.media.map((url, i) => (
-                  <div key={i} className="w-12 h-12 rounded-xl bg-white border border-amber-200 overflow-hidden relative group">
+                  <div key={i} className="w-10 h-10 rounded-lg bg-white border border-amber-200 overflow-hidden relative group">
                     <img src={url} className="w-full h-full object-cover" alt="attachment" />
                     <button 
                       onClick={() => setComplaintDraft({ ...complaintDraft, media: complaintDraft.media.filter((_, idx) => idx !== i) })}
                       className="absolute inset-0 bg-red-500/80 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
                     >
-                      <X size={14} />
+                      <X size={12} />
                     </button>
                   </div>
                 ))}
               </div>
             )}
 
-            <div className="flex items-center justify-between pt-1">
-              <p className="text-[11px] text-amber-800 font-medium">
-                Say <span className="font-bold">"Yes"</span> or tap confirm to submit this report.
+            <div className="flex items-center justify-between pt-0.5">
+              <p className="text-[10px] text-amber-800 font-medium">
+                Say <span className="font-bold">"Yes"</span> or tap confirm to submit.
               </p>
               <button
                 onClick={finalizeComplaint}
                 disabled={isLoading}
-                className="px-4 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-colors shadow-sm"
+                className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold uppercase tracking-wider transition-colors shadow-sm"
               >
                 Confirm Report
               </button>
@@ -612,12 +854,62 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           </motion.div>
         )}
 
+        {/* High-Contrast Visible Chat Input Box */}
+        <form 
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (manualText.trim()) {
+              setIsMinimized(false);
+              handleSendMessage(manualText);
+            }
+          }}
+          className="flex items-center gap-2 bg-white p-2 sm:p-2.5 rounded-2xl border-2 border-indigo-500/90 shadow-xl shadow-indigo-100/70 focus-within:border-indigo-600 focus-within:ring-2 focus-within:ring-indigo-300 transition-all"
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setIsMinimized(false);
+              toggleListening();
+            }}
+            className={`p-2.5 rounded-xl transition-all ${
+              isListening 
+                ? 'bg-red-500 text-white animate-pulse shadow-md shadow-red-200' 
+                : 'bg-indigo-50 text-indigo-600 border border-indigo-200 hover:bg-indigo-100 active:scale-95'
+            }`}
+            title={isListening ? "Stop Listening" : "Start Voice Input"}
+          >
+            {isListening ? <MicOff size={18} /> : <Mic size={18} />}
+          </button>
+
+          <input
+            type="text"
+            placeholder={
+              language === 'Kannada' 
+                ? "ಇಲ್ಲಿ ಸಂದೇಶ ಟೈಪ್ ಮಾಡಿ..." 
+                : language === 'Hindi' 
+                ? "यहाँ अपना प्रश्न टाइप करें..." 
+                : "Type your query or complaint here..."
+            }
+            value={manualText}
+            onChange={(e) => setManualText(e.target.value)}
+            className="flex-1 bg-slate-50 focus:bg-white px-3 py-2 text-xs sm:text-sm font-semibold text-slate-900 placeholder-slate-400 focus:outline-none rounded-xl border border-slate-200 focus:border-indigo-500 transition-all"
+          />
+
+          <button
+            type="submit"
+            disabled={!manualText.trim() || isLoading}
+            className="p-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-xl transition-all disabled:opacity-40 shadow-md shadow-indigo-200 flex items-center justify-center shrink-0"
+          >
+            <Send size={16} />
+          </button>
+        </form>
+
         {/* Identity Alert */}
         {!profile.name && (
-          <div className="bg-indigo-50/60 p-3.5 rounded-2xl border border-indigo-100 flex items-center gap-2.5">
-            <Sparkles size={16} className="text-indigo-600 shrink-0" />
-            <p className="text-xs text-indigo-900 font-medium">
-              Tip: Set your name and phone in the top profile to receive personalized voice responses.
+          <div className="bg-indigo-50/70 p-2 rounded-xl border border-indigo-100 flex items-center gap-2">
+            <Sparkles size={14} className="text-indigo-600 shrink-0" />
+            <p className="text-[10px] text-indigo-900 font-medium">
+              Tip: Set your name and phone in profile to personalize answers.
             </p>
           </div>
         )}
