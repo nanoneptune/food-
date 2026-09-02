@@ -102,14 +102,14 @@ export default function ParticleBall({
     const baseSphereRadius = 78;
     const particles: Particle3D[] = [];
 
-    // Colors palette for high-fidelity glowing sphere
+    // Colors palette: light white to variant white sphere particles
     const colors = [
-      'rgba(99, 102, 241, ',  // Indigo
-      'rgba(129, 140, 248, ', // Light Indigo
-      'rgba(168, 85, 247, ',  // Purple
-      'rgba(56, 189, 248, ',  // Sky Blue
-      'rgba(236, 72, 153, ',  // Pink / Magenta
-      'rgba(255, 255, 255, ', // White Core Specular
+      'rgba(255, 255, 255, ', // Pure Bright White
+      'rgba(255, 250, 250, ', // Snow White
+      'rgba(254, 242, 242, ', // Soft Rose-White
+      'rgba(255, 255, 255, ', // Core Crisp White
+      'rgba(248, 250, 252, ', // Pearl White
+      'rgba(255, 241, 242, ', // Light Alabaster White
     ];
 
     // Fibonacci sphere distribution for uniform spherical dispersion
@@ -266,12 +266,8 @@ export default function ParticleBall({
           const dist = Math.sqrt(dx * dx + dy * dy);
 
           if (dist < maxConnectDist) {
-            const lineAlpha = (1 - dist / maxConnectDist) * 0.24 * Math.min(p1.alpha, p2.alpha);
-            if (isSpeaking) {
-              ctx.strokeStyle = `rgba(216, 180, 254, ${lineAlpha})`;
-            } else {
-              ctx.strokeStyle = `rgba(165, 180, 252, ${lineAlpha})`;
-            }
+            const lineAlpha = (1 - dist / maxConnectDist) * 0.28 * Math.min(p1.alpha, p2.alpha);
+            ctx.strokeStyle = `rgba(255, 255, 255, ${lineAlpha})`;
             ctx.beginPath();
             ctx.moveTo(p1.x2d, p1.y2d);
             ctx.lineTo(p2.x2d, p2.y2d);

@@ -6,40 +6,30 @@
 import { BrowserRouter, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import VoiceAssistant from './components/VoiceAssistant';
 import TrackComplaints from './components/TrackComplaints';
+import { IVRDialer } from './components/IVRDialer';
 import Admin from './components/Admin';
-import { Mic, FileText, Lock, User, Bell, X, Check, Upload } from 'lucide-react';
+import { Mic, FileText, Lock, User, Bell, X, Check, Upload, PhoneCall } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useState } from 'react';
 import { UserProfile } from './types';
 
-function Header({ onProfileClick, profile }: { onProfileClick: () => void; profile: UserProfile }) {
+function FloatingProfileButton({ onProfileClick, profile }: { onProfileClick: () => void; profile: UserProfile }) {
+  const location = useLocation();
+  if (location.pathname.startsWith('/admin')) {
+    return null;
+  }
   return (
-    <header className="fixed top-0 left-0 right-0 h-14 bg-white/80 backdrop-blur-2xl z-50 flex items-center justify-between px-4 border-b border-slate-100">
-      <div className="flex items-center gap-2.5">
-        <img 
-          src="https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png" 
-          alt="VoxAssist"
-          className="w-7 h-7 object-contain rounded-lg shadow-sm ring-2 ring-indigo-50 bg-white p-0.5"
-        />
-        <div className="flex items-baseline gap-1.5">
-          <h1 className="text-sm font-bold text-slate-900 tracking-tight leading-none">VoxAssist</h1>
-          <span className="text-[8px] font-bold text-indigo-600 uppercase tracking-wider">AI Voice</span>
-        </div>
-      </div>
-      <div className="flex items-center gap-2">
-        <button 
-          onClick={onProfileClick}
-          className="w-8 h-8 rounded-full bg-indigo-50 border border-indigo-100 shadow-sm flex flex-col items-center justify-center text-indigo-600 font-bold overflow-hidden transition-transform active:scale-95"
-          title="User Profile"
-        >
-          {profile.name ? (
-            <span className="text-[11px]">{profile.name.charAt(0).toUpperCase()}</span>
-          ) : (
-            <User size={15} />
-          )}
-        </button>
-      </div>
-    </header>
+    <button 
+      onClick={onProfileClick}
+      className="fixed top-4 right-4 z-50 w-11 h-11 rounded-full bg-white/95 hover:bg-white text-rose-600 shadow-xl border border-white/70 flex items-center justify-center font-black transition-all hover:scale-105 active:scale-95 cursor-pointer backdrop-blur-md"
+      title="User Profile"
+    >
+      {profile.name ? (
+        <span className="text-sm font-black">{profile.name.charAt(0).toUpperCase()}</span>
+      ) : (
+        <User size={18} className="text-rose-600" />
+      )}
+    </button>
   );
 }
 
@@ -53,37 +43,41 @@ function MobileNav() {
 
   const links = [
     { to: '/', label: 'Talk', icon: Mic },
+    { to: '/ivr', label: 'IVR Demo', icon: PhoneCall },
     { to: '/track', label: 'Track Reports', icon: FileText },
   ];
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 h-14 bg-white/85 backdrop-blur-2xl border-t border-slate-100 z-50 px-6 flex items-center justify-around">
-      {links.map(({ to, label, icon: Icon }) => (
-        <Link 
-          key={to} 
-          to={to} 
-          className="relative flex flex-col items-center gap-0.5 min-w-[72px]"
-        >
-          <div className={`p-1.5 rounded-xl transition-all duration-200 ${
-            location.pathname === to
-            ? 'bg-indigo-600 text-white shadow-md shadow-indigo-100 -translate-y-1' 
-            : 'text-slate-400 hover:text-slate-600'
-          }`}>
-            <Icon size={17} />
-          </div>
-          <span className={`text-[9px] font-bold uppercase tracking-wider transition-all whitespace-nowrap ${
-            location.pathname === to ? 'text-indigo-600 opacity-100' : 'text-slate-400 opacity-60'
-          }`}>
-            {label}
-          </span>
-          {location.pathname === to && (
-            <motion.div 
-              layoutId="nav-dot"
-              className="absolute -top-0.5 w-1 h-1 bg-indigo-600 rounded-full"
-            />
-          )}
-        </Link>
-      ))}
+    <nav className="fixed bottom-0 left-0 right-0 h-16 bg-white/10 backdrop-blur-2xl border-t border-white/20 z-50 px-6 flex items-center justify-around shadow-[0_-8px_32px_rgba(0,0,0,0.15)]">
+      {links.map(({ to, label, icon: Icon }) => {
+        const isActive = location.pathname === to;
+        return (
+          <Link 
+            key={to} 
+            to={to} 
+            className="relative flex flex-col items-center gap-0.5 min-w-[72px]"
+          >
+            <div className={`p-2 rounded-2xl transition-all duration-300 ${
+              isActive
+              ? 'bg-white text-rose-600 shadow-xl shadow-black/15 -translate-y-1 scale-105 backdrop-blur-md' 
+              : 'text-white/70 hover:text-white hover:bg-white/10'
+            }`}>
+              <Icon size={19} />
+            </div>
+            <span className={`text-[10px] font-bold uppercase tracking-wider transition-all whitespace-nowrap ${
+              isActive ? 'text-white font-black opacity-100 drop-shadow-sm' : 'text-white/65 opacity-80'
+            }`}>
+              {label}
+            </span>
+            {isActive && (
+              <motion.div 
+                layoutId="nav-dot"
+                className="absolute -top-1 w-1.5 h-1.5 bg-white rounded-full shadow-[0_0_8px_rgba(255,255,255,0.9)]"
+              />
+            )}
+          </Link>
+        );
+      })}
     </nav>
   );
 }
@@ -212,12 +206,13 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-indigo-100">
-        <Header onProfileClick={() => setIsProfileOpen(true)} profile={profile} />
-        <main className="pt-16 pb-20">
+      <div className="min-h-screen bg-pepero-gradient text-slate-900 font-sans selection:bg-white/30 selection:text-white relative">
+        <FloatingProfileButton onProfileClick={() => setIsProfileOpen(true)} profile={profile} />
+        <main className="pt-4 pb-20">
           <AnimatePresence mode="wait">
             <Routes>
               <Route path="/" element={<VoiceAssistant profile={profile} />} />
+              <Route path="/ivr" element={<IVRDialer profile={profile} />} />
               <Route path="/track" element={<TrackComplaints profile={profile} onOpenProfile={() => setIsProfileOpen(true)} />} />
               <Route path="/admin/*" element={<Admin />} />
               <Route path="*" element={<Navigate to="/" />} />

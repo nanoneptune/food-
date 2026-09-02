@@ -556,7 +556,7 @@ const upload = multer({
   }
 });
 
-// API: Upload to Cloudinary
+// API: Upload to Cloudinary (General)
 app.post("/api/upload", upload.single("file"), async (req: any, res) => {
   try {
     const file = req.file;
@@ -572,6 +572,31 @@ app.post("/api/upload", upload.single("file"), async (req: any, res) => {
     res.json({ url: result.secure_url });
   } catch (error) {
     res.status(500).json({ error: "Upload failed" });
+  }
+});
+
+// API: Upload Voice Note to Cloudinary as MP3
+app.post("/api/upload-audio", upload.single("audio"), async (req: any, res) => {
+  try {
+    const file = req.file;
+    if (!file) return res.status(400).json({ error: "No audio file provided" });
+
+    const b64 = Buffer.from(file.buffer).toString("base64");
+    const mime = file.mimetype || "audio/webm";
+    const dataURI = `data:${mime};base64,${b64}`;
+
+    // Upload to Cloudinary with format mp3 & resource_type video
+    const result = await cloudinary.uploader.upload(dataURI, {
+      resource_type: "video",
+      format: "mp3",
+      folder: "voxassist_voice_notes",
+    });
+
+    console.log("[Cloudinary Audio Upload] Saved MP3 voice note:", result.secure_url);
+    res.json({ url: result.secure_url, format: "mp3" });
+  } catch (error: any) {
+    console.error("Audio upload error:", error);
+    res.status(500).json({ error: error.message || "Failed to upload audio" });
   }
 });
 
@@ -650,6 +675,17 @@ app.post("/api/process-document", upload.single("file"), async (req: MulterReque
   }
 });
 
+// Helper to strip all emojis and symbols from text before TTS so they are never read out
+function stripEmojis(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/[\u{1F300}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{2600}-\u{27BF}\u{1F900}-\u{1F9FF}\u{1F1E0}-\u{1F1FF}\u{1F000}-\u{1F02F}\u{1F0A0}-\u{1F0FF}\u{1F100}-\u{1F64F}\u{1F910}-\u{1F96B}\u{1F980}-\u{1F9E0}\u{2B50}\u{2B55}\u{231A}\u{23F0}\u{23F3}\u{25AA}\u{25AB}\u{25FB}-\u{25FE}\u{FE0E}\u{FE0F}\u{200D}]/gu, '')
+    .replace(/[*#_`~\[\]\(\)]/g, ' ')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 // Helper to generate & upload TTS audio to Cloudinary for instant playback
 async function generateTTSAudioUrl(text: string, language: string): Promise<string | null> {
   if (!text) return null;
@@ -659,7 +695,7 @@ async function generateTTSAudioUrl(text: string, language: string): Promise<stri
     if (language === "Hindi" || language === "hi-IN") targetLang = "hi-IN";
     else if (language === "Kannada" || language === "kn-IN") targetLang = "kn-IN";
 
-    const cleanedText = text.replace(/[*#_`~\[\]\(\)]/g, '').replace(/https?:\/\/\S+/g, '').trim();
+    const cleanedText = stripEmojis(text);
     const response = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
       method: "POST",
       headers: {
@@ -804,11 +840,15 @@ Respond ONLY with valid JSON: {"matchId": "<id>"} if matched, or {"matchId": nul
       }
     }
 
-    const systemPrompt = `You are an expert AI Food Service and Customer Support Voice Assistant for VoxAssist.
+    const turnCount = Number(req.body.chatCount) || (Array.isArray(history) ? Math.floor(history.length / 2) + 1 : 1);
+
+    const systemPrompt = `You are VoxAssist's expert AI Food Service, Hygiene, and Consumer Grievance Voice Assistant.
 Customer Profile:
 - Name: ${profile?.name || "Guest"}
 - Phone: ${profile?.phone || "Not provided"}
 - Location: ${profile?.location || "Not specified"}
+
+CONVERSATION TURN COUNT IN THIS SESSION: ${turnCount}
 
 KNOWLEDGE BASE CONTEXT (Menus, policies, items, pricing, rules recognized from admin documents):
 """
@@ -817,15 +857,56 @@ ${effectiveContext || "No custom knowledge documents uploaded yet."}
 
 TARGET RESPONSE LANGUAGE: ${language || "English"}.
 
-INSTRUCTIONS & BEHAVIOR:
-1. Ground your answers directly on the provided Knowledge Base Context. If the customer asks about dishes, ingredients, prices, timings, allergens, or procedures present in the knowledge base, provide accurate, helpful answers.
-2. If the user reports an issue, spoiled food, delay, incorrect order, hygiene concern, or complaint:
-   - Sympathize warmly and offer to register an official report/complaint with their audio.
-   - You MUST append the token "COMPLAINT_DRAFT_REQUEST" at the very end of your response so the system opens the complaint confirmation dialog.
-3. If the user is confirming a complaint (saying yes, confirm, okay, ha, sari), acknowledge that it has been logged and escalated to the management.
-4. Keep spoken responses concise, natural, and clear (1-3 sentences), ideal for voice synthesis.
-5. Always speak in the requested language (${language || "English"}).
-6. Maintain memory of the conversation flow. Refer back to previous questions or topics when asked follow-up questions (e.g., "why?", "tell me more", "how much").`;
+STRICT CONVERSATION & COMPLAINT RULES:
+1. STRICT 4-CONVERSATION THRESHOLD:
+   - You are STRICTLY FORBIDDEN from asking, proposing, or offering to register a complaint if the conversation turn count is LESS THAN 4 (turnCount < 4).
+   - If turnCount < 4: Answer questions, provide helpful guidance, explain food items or policies, sympathize politely with any distress, but DO NOT ask to file or register a formal complaint yet.
+2. INFORMATION GATHERING BEFORE COMPLAINT:
+   - If turnCount >= 4 AND the customer reports an unresolved grievance, food quality issue, hygiene violation, or wants to register a complaint:
+     BEFORE creating or confirming the complaint, you MUST verify that you have collected:
+     a) CAUSE: Exactly what happened or went wrong (e.g. foul smell, foreign object, undercooked food, contamination, delayed delivery).
+     b) WHERE / LOCATION: The specific outlet name, branch, restaurant, or delivery location.
+     c) ALL NEEDED INFORMATION: Food item name, date/time, affected persons/symptoms if any.
+   - If CAUSE or WHERE is missing: Politely ask the customer for the missing details (e.g. "Could you please tell me where this happened (restaurant/branch name)?" or "Could you clarify what specifically went wrong with the food?"). DO NOT trigger complaint creation until both CAUSE and WHERE are obtained.
+3. HIGHLY DESIGNED MARKDOWN GRIEVANCE REPORT:
+   - Once turnCount >= 4 AND both CAUSE and WHERE are provided:
+     Create a comprehensive, highly designed Markdown report.
+     Use this exact structured layout:
+
+# 📋 Official Consumer Grievance Report
+> **Reference ID:** #GRV-${Date.now().toString().slice(-6)} | **Priority:** High | **Status:** Pending Review
+
+---
+
+### 📍 Incident Summary
+| Parameter | Record Details |
+| :--- | :--- |
+| **Consumer Name** | ${profile?.name || "Valued Consumer"} |
+| **Contact Phone** | ${profile?.phone || "Registered Phone"} |
+| **Incident Location** | [Extracted Location/Branch] |
+| **Target Food Item** | [Extracted Food Item] |
+| **Core Cause / Violation** | [Extracted Root Cause] |
+| **Reported Timestamp** | ${new Date().toLocaleString()} |
+
+---
+
+### 🔍 Cause & Incident Breakdown
+[Detailed explanation of the cause, symptoms, or service failure]
+
+### ⚠️ Hygiene & Safety Compliance Assessment
+- **FSSAI Food Safety Risk:** High concern regarding food handling and storage standards.
+- **Consumer Impact:** Direct quality/health grievance reported.
+
+### 📌 Required Corrective Actions
+1. Urgent kitchen audit at the specified location.
+2. Immediate consumer redressal & refund/replacement processing.
+3. Managerial follow-up within 24 hours.
+
+---
+*Report generated by VoxAssist AI Governance Protocol*
+
+     Accompany this markdown report with 1 short, polite spoken sentence in ${language || "English"}, and append the token COMPLAINT_DRAFT_REQUEST at the very end of your response.
+4. Spoken tone: Always maintain a calm, pleasant, respectful, and reassuring tone. Keep the spoken portion natural and concise (1-2 sentences).`;
 
     const conversationHistory = Array.isArray(history) && history.length > 0
       ? history.slice(-8).map((h: any) => ({
@@ -856,10 +937,30 @@ INSTRUCTIONS & BEHAVIOR:
     }
 
     const isComplaintDraft = responseText.includes("COMPLAINT_DRAFT_REQUEST");
-    const cleanedText = responseText.replace("COMPLAINT_DRAFT_REQUEST", "").trim();
+    const cleanedText = responseText.replace(/COMPLAINT_DRAFT_REQUEST/g, "").trim();
 
-    // Generate audio for fast playback & Cloudinary storage
-    const audioUrl = await generateTTSAudioUrl(cleanedText, targetLang);
+    let spokenPart = cleanedText;
+    let markdownPart = "";
+
+    if (cleanedText.includes("# 📋") || cleanedText.includes("Official Consumer Grievance")) {
+      const parts = cleanedText.split(/(?=# 📋|# Official Consumer Grievance)/);
+      if (parts.length > 1 && parts[0].trim().length > 10) {
+        spokenPart = parts[0].trim();
+        markdownPart = parts.slice(1).join("").trim();
+      } else {
+        markdownPart = cleanedText;
+        if (language === 'Kannada') {
+          spokenPart = "ನಿಮ್ಮ ದೂರನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗಿದೆ. ದಯವಿಟ್ಟು ಕೆಳಗಿನ ಅಧಿಕೃತ ವರದಿಯನ್ನು ಪರಿಶೀಲಿಸಿ ದೃಢೀಕರಿಸಿ.";
+        } else if (language === 'Hindi') {
+          spokenPart = "आपकी औपचारिक शिकायत तैयार कर ली गई है। कृपया नीचे दी गई रिपोर्ट की जाँच करें और पुष्टि करें।";
+        } else {
+          spokenPart = "Your official grievance report has been drafted. Please review the details below and confirm.";
+        }
+      }
+    }
+
+    // Generate audio for fast playback & Cloudinary storage using spoken portion
+    const audioUrl = await generateTTSAudioUrl(spokenPart.slice(0, 450), targetLang);
 
     // Save newly generated Q&A pair into Turso DB qa_cache
     try {
@@ -875,10 +976,230 @@ INSTRUCTIONS & BEHAVIOR:
       console.warn("Save to qa_cache notice:", dbSaveErr?.message);
     }
 
-    res.json({ response: cleanedText, audioUrl, isComplaintDraft, cached: false });
+    res.json({ 
+      response: cleanedText, 
+      spokenText: spokenPart,
+      markdownReport: markdownPart,
+      audioUrl, 
+      isComplaintDraft, 
+      cached: false 
+    });
   } catch (error: any) {
     console.error("Chat error:", error);
     res.status(500).json({ error: error.message || "Failed to process chat" });
+  }
+});
+
+// API: Dedicated Calm & Pleasant IVR Dialogue State Machine
+app.post("/api/ivr/dialogue", async (req, res) => {
+  const { 
+    message, 
+    digits, 
+    step = "welcome", 
+    language = "en-IN", 
+    profile, 
+    collectedData = {}, 
+    history = [] 
+  } = req.body;
+
+  let currentLang = language;
+  let nextStep = step;
+  let replyText = "";
+  let updatedData = { ...collectedData };
+  let isComplaintReady = false;
+  let markdownReport = "";
+
+  const isKannada = currentLang === "kn-IN" || currentLang === "Kannada";
+  const isHindi = currentLang === "hi-IN" || currentLang === "Hindi";
+
+  try {
+    // 1. DTMF Language Selection (1 = Kannada, 2 = Hindi, 3 = English)
+    if (digits === "1" || (step === "welcome" && /kannada|ಕನ್ನಡ/i.test(message || ""))) {
+      currentLang = "kn-IN";
+      nextStep = "collecting_info";
+      replyText = "ನಮಸ್ಕಾರ, ಕನ್ನಡ ಭಾಷೆಯನ್ನು ಆಯ್ಕೆ ಮಾಡಿಕೊಂಡಿದ್ದಕ್ಕಾಗಿ ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ದಯವಿಟ್ಟು ತಾವು ಎದುರಿಸಿದ ಆಹಾರ ಅಥವಾ ಸೇವೆಯ ಸಮಸ್ಯೆಯ ಬಗ್ಗೆ ಸವಿನಯವಾಗಿ ತಿಳಿಸಿಕೊಡಿ. ನಾವು ಗಮನವಿಟ್ಟು ಆಲಿಸುತ್ತಿದ್ದೇವೆ.";
+    } else if (digits === "2" || (step === "welcome" && /hindi|हिंदी/i.test(message || ""))) {
+      currentLang = "hi-IN";
+      nextStep = "collecting_info";
+      replyText = "हिंदी चुनने के लिए धन्यवाद। कृपया अपनी भोजन या सेवा संबंधी समस्या का विवरण बताएं। हम आपकी पूरी सहायता करेंगे।";
+    } else if (digits === "3" || (step === "welcome" && /english/i.test(message || ""))) {
+      currentLang = "en-IN";
+      nextStep = "collecting_info";
+      replyText = "Thank you for choosing English. Please describe the food quality or service issue you encountered. We are listening.";
+    } 
+    // 2. DTMF Key 7: Press 7 for Audio Voice Note Recording
+    else if (digits === "7" || /press 7|record audio|voice note/i.test(message || "")) {
+      nextStep = "ready_for_beep";
+      if (isKannada) {
+        replyText = "ದಯವಿಟ್ಟು ಬೀಪ್ ಶಬ್ದದ ನಂತರ ತಮ್ಮ ವಿವರವಾದ ಧ್ವನಿ ಸಂದೇಶವನ್ನು ಸ್ಪಷ್ಟವಾಗಿ ಮಾತನಾಡಿ.";
+      } else if (isHindi) {
+        replyText = "कृपया बीप की आवाज़ के बाद अपना विस्तृत ऑडियो संदेश रिकॉर्ड करें।";
+      } else {
+        replyText = "Please record your message after the beep.";
+      }
+    }
+    // 3. DTMF Key 9 or explicit user confirmation to submit
+    else if (digits === "9" || (step === "press_7_prompt" && /confirm|yes|submit|sari|ha/i.test(message || ""))) {
+      nextStep = "submitted";
+      isComplaintReady = true;
+
+      const caseId = `GRV-${Date.now().toString().slice(-6)}`;
+      const cause = updatedData.cause || "Food hygiene & quality discrepancy";
+      const location = updatedData.location || profile?.location || "Unspecified Branch";
+      const item = updatedData.item || "Food Item";
+
+      markdownReport = `# 📋 Official Consumer Grievance Report
+> **Reference ID:** #${caseId} | **Channel:** IVR Helpline (1800-FOOD-VOX) | **Priority:** High | **Status:** Logged & Under Review
+
+---
+
+### 📍 Incident Specifics
+| Parameter | Record Details |
+| :--- | :--- |
+| **Consumer Name** | ${profile?.name || "Valued Customer"} |
+| **Contact Phone** | ${profile?.phone || "Phone On File"} |
+| **Incident Location** | ${location} |
+| **Affected Item** | ${item} |
+| **Core Cause / Violation** | ${cause} |
+| **Incident Timestamp** | ${new Date().toLocaleString()} |
+
+---
+
+### 🔍 Cause & Incident Breakdown
+${cause}
+
+### 🎙️ Audio Evidence
+${updatedData.audioNoteUrl ? `**Voice Note Attached (MP3):** [Play Voice Evidence](${updatedData.audioNoteUrl})` : "No direct audio recording attached."}
+
+### ⚠️ Safety & Compliance Protocol
+- **Hygiene & Safety Assessment:** Immediate compliance audit initiated.
+- **Regulatory Framework:** FSSAI Schedule 4 Standards & Consumer Protection Act 2019.
+
+### 📌 Corrective Actions
+1. Immediate notification sent to outlet manager at ${location}.
+2. Redressal & refund processing scheduled.
+3. Audio recording and transcript archived for administrative review.
+
+---
+*Report filed via VoxAssist IVR Voice System*`;
+
+      // Save into Turso database complaints table
+      try {
+        const turso = getTurso();
+        if (turso) {
+          await turso.execute({
+            sql: `INSERT INTO complaints (id, name, phoneNumber, location, query, status, chatHistory, mediaUrls, audioUrl, createdAt)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            args: [
+              caseId,
+              profile?.name || "IVR Caller",
+              profile?.phone || "IVR Phone",
+              location,
+              markdownReport,
+              "pending",
+              JSON.stringify(history || []),
+              "[]",
+              updatedData.audioNoteUrl || "",
+              Date.now()
+            ]
+          });
+          console.log(`[IVR] Successfully registered complaint ${caseId} in Turso DB`);
+        }
+      } catch (dbErr: any) {
+        console.warn("[IVR] Turso insert notice:", dbErr?.message);
+      }
+
+      if (isKannada) {
+        replyText = `ತಮ್ಮ ದೂರು ಸಂಖ್ಯೆ ${caseId} ಯಶಸ್ವಿಯಾಗಿ ನೋಂದಾಯಿಸಲ್ಪಟ್ಟಿದೆ. ನಮ್ಮ ಸಹಾಯವಾಣಿಯನ್ನು ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕಾಗಿ ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ತಮಗೆ ಶುಭ ದಿನ!`;
+      } else if (isHindi) {
+        replyText = `आपकी शिकायत संख्या ${caseId} सफलतापूर्वक दर्ज कर ली गई है। कॉल करने के लिए धन्यवाद। आपका दिन शुभ हो!`;
+      } else {
+        replyText = `Your complaint reference ID ${caseId} has been successfully registered. Thank you for calling. Have a pleasant day!`;
+      }
+    }
+    // 4. Ongoing conversation to collect information (Cause & Where)
+    else {
+      // Use LLM to extract cause and location calmly
+      const prompt = `You are a calm, gentle, highly empathetic, and polite IVR Phone Agent for VoxAssist Consumer Helpline.
+User profile: Name: ${profile?.name || "Caller"}, Phone: ${profile?.phone || "On File"}, Location: ${profile?.location || "Not given"}.
+Currently known details:
+- Cause: ${updatedData.cause || "Unknown"}
+- Location/Where: ${updatedData.location || "Unknown"}
+- Item: ${updatedData.item || "Unknown"}
+
+Customer just said: "${message}"
+
+Language: ${currentLang} (kn-IN for Kannada, hi-IN for Hindi, en-IN for English).
+
+Instructions:
+1. Identify any newly mentioned cause (what went wrong), location (restaurant name, branch, address), or item name.
+2. If the user hasn't specified WHERE (location/restaurant), calmly and politely ask them for the branch/location.
+3. If the user hasn't specified the CAUSE (what was wrong with the food), calmly ask them what specifically happened.
+4. When speaking Kannada, ALWAYS use polite and respectful honorifics (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ, ತಿಳಿಸಿಕೊಡಿ, ಕ್ಷಮಿಸಿ).
+5. If BOTH Cause and Where are now known:
+   Calmly summarize what was noted and state:
+   "If you would like to record a voice note, press 7. To submit your complaint now, press 9 or say confirm." (in the target language!).
+6. Keep your spoken response to 1-2 calm, reassuring sentences.
+
+Respond in strict JSON:
+{
+  "cause": "updated or existing cause",
+  "location": "updated or existing location",
+  "item": "updated or existing item",
+  "spokenResponse": "1-2 calm sentences to speak to the caller in ${currentLang}",
+  "hasBothCauseAndWhere": true/false
+}`;
+
+      const aiResponse = await runLLMGeneration({ prompt }) || "{}";
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(aiResponse);
+      } catch {
+        parsed = {};
+      }
+
+      if (parsed.cause) updatedData.cause = parsed.cause;
+      if (parsed.location) updatedData.location = parsed.location;
+      if (parsed.item) updatedData.item = parsed.item;
+
+      if (parsed.hasBothCauseAndWhere || (updatedData.cause && updatedData.location)) {
+        nextStep = "press_7_prompt";
+        if (parsed.spokenResponse) {
+          replyText = parsed.spokenResponse;
+        } else {
+          if (isKannada) {
+            replyText = `ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ತಮ್ಮ ದೂರನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗಿದೆ. ತಾವು ಸ್ವತಃ ಧ್ವನಿ ಸಂದೇಶ ರೆಕಾರ್ಡ್ ಮಾಡಲು ಬಯಸಿದರೆ 7 ಒತ್ತಿ, ಅಥವಾ ದೂರನ್ನು ಸಲ್ಲಿಸಲು 9 ಒತ್ತಿ.`;
+          } else if (isHindi) {
+            replyText = `धन्यवाद। हमने विवरण नोट कर लिया है। यदि आप अपनी आवाज़ में संदेश रिकॉर्ड करना चाहते हैं तो 7 दबाएँ, अथवा शिकायत दर्ज करने के लिए 9 दबाएँ।`;
+          } else {
+            replyText = `Thank you. We have recorded your concern. If you would like to record a voice note, press 7. To submit your complaint, press 9 or say confirm.`;
+          }
+        }
+      } else {
+        nextStep = "collecting_info";
+        replyText = parsed.spokenResponse || (
+          isKannada 
+            ? "ದಯವಿಟ್ಟು ಈ ಘಟನೆ ನಡೆದ ಸ್ಥಳ, ಹೋಟೆಲ್ ಅಥವಾ ಅಂಗಡಿಯ ಹೆಸರನ್ನು ಸವಿನಯವಾಗಿ ತಿಳಿಸುವಿರಾ?" 
+            : (isHindi ? "कृपया उस स्थान या रेस्टोरेंट का नाम बताएं जहाँ यह समस्या हुई।" : "Could you please let us know the location or restaurant name?")
+        );
+      }
+    }
+
+    // Generate high quality TTS using Sarvam female voice (1st priority)
+    const audioUrl = await generateTTSAudioUrl(replyText, currentLang);
+
+    res.json({
+      text: replyText,
+      audioUrl,
+      nextStep,
+      language: currentLang,
+      collectedData: updatedData,
+      isComplaintReady,
+      markdownReport
+    });
+  } catch (err: any) {
+    console.error("[IVR Dialogue Error]", err);
+    res.status(500).json({ error: err.message || "IVR dialogue error" });
   }
 });
 
@@ -900,7 +1221,7 @@ app.post("/api/tts", async (req, res) => {
   }
 
   try {
-    const cleanedText = text.replace(/[*#_`~\[\]\(\)]/g, '').replace(/https?:\/\/\S+/g, '').trim();
+    const cleanedText = stripEmojis(text);
     const response = await fetch("https://api.sarvam.ai/text-to-speech", {
       method: "POST",
       headers: {

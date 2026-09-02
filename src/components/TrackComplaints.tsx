@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { UserProfile, VoiceInteraction, Complaint } from '../types';
+import { RenderedMarkdown } from './RenderedMarkdown';
 
 interface TrackComplaintsProps {
   profile: UserProfile;
@@ -179,10 +180,16 @@ export default function TrackComplaints({ profile, onOpenProfile }: TrackComplai
 
                 {/* Complaint Summary */}
                 <div className="space-y-1">
-                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Reported Issue</p>
-                  <p className="text-sm font-semibold text-slate-800 leading-relaxed bg-slate-50 p-4 rounded-2xl border border-slate-100">
-                    "{item.query}"
-                  </p>
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Reported Issue & Case Dossier</p>
+                  {item.query && (item.query.includes('# ') || item.query.includes('### ') || item.query.includes('| Parameter |') || item.query.includes('|---')) ? (
+                    <div className="p-4 bg-slate-50/80 rounded-2xl border border-slate-200">
+                      <RenderedMarkdown content={item.query} />
+                    </div>
+                  ) : (
+                    <p className="text-sm font-semibold text-slate-800 leading-relaxed bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                      "{item.query}"
+                    </p>
+                  )}
                 </div>
 
                 {/* Official Admin Reply Banner if present */}

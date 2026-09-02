@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, Send, AlertCircle, Loader2, Languages, Utensils, Upload, X, Volume2, VolumeX, Sparkles, ChevronDown, ChevronUp, Cpu } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Mic, MicOff, Send, AlertCircle, Loader2, Languages, Utensils, Upload, X, Volume2, VolumeX, Sparkles, ChevronDown, ChevronUp, Cpu, PhoneCall } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { VoiceInteraction, UserProfile } from '../types';
 import ParticleBall from './ParticleBall';
+import { RenderedMarkdown } from './RenderedMarkdown';
 import { transcribeAudioInBrowser } from '../lib/clientWhisper';
+import { stripEmojis } from '../utils/text';
 
 function isHallucinatedText(text: string): boolean {
   if (!text || !text.trim()) return true;
@@ -46,7 +49,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const [messages, setMessages] = useState<VoiceInteraction[]>([]);
   const [language, setLanguage] = useState<'English' | 'Hindi' | 'Kannada'>('English');
   const [isLoading, setIsLoading] = useState(false);
-  const [complaintDraft, setComplaintDraft] = useState<{ query: string; media: string[] } | null>(null);
+  const [complaintDraft, setComplaintDraft] = useState<{ query: string; markdownReport?: string; media: string[] } | null>(null);
   const [isUploadingMedia, setIsUploadingMedia] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
   const mediaInputRef = useRef<HTMLInputElement>(null);
@@ -54,6 +57,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(typeof window !== 'undefined' ? window.speechSynthesis : null);
+  const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const transcriptRef = useRef<string>('');
@@ -95,6 +99,25 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     setPlayingMsgId(null);
     updateSpeakingState(false);
   };
+
+  // Initialize and load browser speech synthesis voices (e.g. Google Kannada, Google Hindi, Google English)
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      synthRef.current = window.speechSynthesis;
+      const updateVoices = () => {
+        try {
+          const list = window.speechSynthesis.getVoices();
+          if (list && list.length > 0) {
+            voicesRef.current = list;
+          }
+        } catch (e) {
+          console.warn("Could not load speech synthesis voices", e);
+        }
+      };
+      updateVoices();
+      window.speechSynthesis.onvoiceschanged = updateVoices;
+    }
+  }, []);
 
   // Auto-scroll chat stream to bottom whenever messages or loading state changes
   useEffect(() => {
@@ -139,7 +162,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       
       recorder.start(100); // 100ms timeslice for responsive audio capture
 
-      // AudioContext Voice Activity Detection (VAD) for instant silence response
+      // AudioContext Voice Activity Detection (VAD) for particle energy & audio tracking
       try {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioCtx) {
@@ -162,21 +185,10 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             }
             const average = sum / dataArray.length;
 
-            // Volume threshold for human speech (sensitive enough for soft speaking)
-            if (average > 5) {
+            // Only track sound activity when speech text has actually started capturing
+            if (average > 8 && transcriptRef.current.trim().length > 0) {
               hasSpokenRef.current = true;
               lastSoundTimeRef.current = Date.now();
-              if (silenceTimerRef.current) {
-                clearTimeout(silenceTimerRef.current);
-                silenceTimerRef.current = null;
-              }
-            } else if (hasSpokenRef.current && lastSoundTimeRef.current > 0) {
-              // 2.5 seconds of silence after user spoke -> Auto Stop & Send!
-              if (Date.now() - lastSoundTimeRef.current > 2500) {
-                hasSpokenRef.current = false;
-                lastSoundTimeRef.current = 0;
-                stopListeningAndSend();
-              }
             }
           }, 100);
         }
@@ -284,18 +296,22 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
     try {
       if (recognitionRef.current) {
-        recognitionRef.current.abort();
+        try {
+          recognitionRef.current.abort();
+        } catch {}
       }
 
       if (SpeechRecognition) {
         const recognition = new SpeechRecognition();
-        recognition.continuous = false;
+        // Continuous listening so natural pauses between Kannada / Hindi words do not abort recognition
+        recognition.continuous = true;
         recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
         
-        // Assign language code
+        // Exact BCP-47 language tag for Google Keyboard / Chrome speech engine
         if (language === 'Hindi') recognition.lang = 'hi-IN';
         else if (language === 'Kannada') recognition.lang = 'kn-IN';
-        else recognition.lang = 'en-US';
+        else recognition.lang = 'en-IN';
 
         recognition.onstart = () => {
           updateListeningState(true);
@@ -303,14 +319,22 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         };
 
         recognition.onresult = (event: any) => {
+          let finalTranscript = '';
           let interimTranscript = '';
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            const piece = event.results[i][0].transcript;
-            interimTranscript += piece;
+
+          for (let i = 0; i < event.results.length; ++i) {
+            const res = event.results[i];
+            if (res.isFinal) {
+              finalTranscript += res[0].transcript + ' ';
+            } else {
+              interimTranscript += res[0].transcript;
+            }
           }
-          if (interimTranscript.trim()) {
-            transcriptRef.current = interimTranscript;
-            setTranscript(interimTranscript);
+
+          const combined = (finalTranscript + interimTranscript).trim();
+          if (combined) {
+            transcriptRef.current = combined;
+            setTranscript(combined);
             hasSpokenRef.current = true;
             lastSoundTimeRef.current = Date.now();
 
@@ -319,27 +343,16 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               stopSpeaking();
             }
 
-            // Auto Silence Detection: After 2.5s of no new spoken words, finish & respond!
+            // Silence Detection: After 2.0s of silence after speech, auto send!
             if (silenceTimerRef.current) {
               clearTimeout(silenceTimerRef.current);
             }
             silenceTimerRef.current = setTimeout(() => {
-              if (isListeningRef.current) {
+              if (isListeningRef.current && transcriptRef.current.trim()) {
                 stopListeningAndSend();
               }
-            }, 2500);
+            }, 2000);
           }
-        };
-
-        recognition.onspeechend = () => {
-          if (silenceTimerRef.current) {
-            clearTimeout(silenceTimerRef.current);
-          }
-          silenceTimerRef.current = setTimeout(() => {
-            if (isListeningRef.current) {
-              stopListeningAndSend();
-            }
-          }, 2000);
         };
 
         recognition.onerror = (event: any) => {
@@ -353,6 +366,11 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           const capturedText = transcriptRef.current?.trim();
           if (capturedText && isListeningRef.current) {
             stopListeningAndSend();
+          } else if (isListeningRef.current) {
+            // Keep listening alive if user is still in listening mode
+            try {
+              recognition.start();
+            } catch {}
           }
         };
 
@@ -363,27 +381,85 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
   }, [language]);
 
-  const fallbackBrowserSpeak = (text: string) => {
-    if (!synthRef.current || !text) return;
+  // Primary 1st Priority TTS: Browser built-in Google Speech Synthesis (Instant, Fast, Zero latency)
+  const speakWithBrowserGoogle = (text: string, lang: string): boolean => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return false;
     try {
-      synthRef.current.cancel();
-      const cleanedForSpeech = text
-        .replace(/[*#_`~\[\]\(\)]/g, '')
-        .replace(/https?:\/\/\S+/g, '')
-        .trim();
+      window.speechSynthesis.cancel();
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+
+      const cleanedForSpeech = stripEmojis(text);
+
+      if (!cleanedForSpeech) return false;
 
       const utterance = new SpeechSynthesisUtterance(cleanedForSpeech);
-      if (language === 'Hindi') utterance.lang = 'hi-IN';
-      else if (language === 'Kannada') utterance.lang = 'kn-IN';
-      else utterance.lang = 'en-US';
+
+      let targetLangCode = 'en-IN';
+      let langPrefix = 'en';
+      if (lang === 'Kannada') {
+        targetLangCode = 'kn-IN';
+        langPrefix = 'kn';
+      } else if (lang === 'Hindi') {
+        targetLangCode = 'hi-IN';
+        langPrefix = 'hi';
+      }
+
+      utterance.lang = targetLangCode;
+      utterance.rate = 1.0;
+      utterance.pitch = 1.0;
+
+      // Find best available voice on the device (prioritize Google keyboard / Android / native voice)
+      const availableVoices = voicesRef.current.length > 0 
+        ? voicesRef.current 
+        : (window.speechSynthesis ? window.speechSynthesis.getVoices() : []);
+
+      const lowerPrefix = langPrefix.toLowerCase();
+      
+      // 1. Google voice specifically for language (e.g. Google ಕನ್ನಡ, Google हिन्दी, Google English)
+      let matchedVoice = availableVoices.find(v => {
+        const vLang = v.lang.toLowerCase().replace('_', '-');
+        const vName = v.name.toLowerCase();
+        return (vLang.startsWith(lowerPrefix) || vName.includes(lang.toLowerCase())) && 
+               (vName.includes('google') || vName.includes('natural'));
+      });
+
+      // 2. Any voice matching language prefix (kn, hi, en)
+      if (!matchedVoice) {
+        matchedVoice = availableVoices.find(v => {
+          const vLang = v.lang.toLowerCase().replace('_', '-');
+          const vName = v.name.toLowerCase();
+          return vLang.startsWith(lowerPrefix) || vName.includes(lang.toLowerCase());
+        });
+      }
+
+      // If user selected Kannada, but this browser has zero Kannada TTS voices installed:
+      // Return false so we can smoothly fall back to server/audioUrl TTS without silence or error!
+      if (lang === 'Kannada' && !matchedVoice) {
+        return false;
+      }
+
+      if (matchedVoice) {
+        utterance.voice = matchedVoice;
+      }
 
       utterance.onstart = () => updateSpeakingState(true);
-      utterance.onend = () => updateSpeakingState(false);
-      utterance.onerror = () => updateSpeakingState(false);
-      synthRef.current.speak(utterance);
+      utterance.onend = () => {
+        updateSpeakingState(false);
+        setPlayingMsgId(null);
+      };
+      utterance.onerror = (e) => {
+        console.warn("Browser speech synthesis error:", e);
+        updateSpeakingState(false);
+        setPlayingMsgId(null);
+      };
+
+      window.speechSynthesis.speak(utterance);
+      return true;
     } catch (e) {
-      console.warn("Browser synthesis error:", e);
-      updateSpeakingState(false);
+      console.warn("Browser speech synthesis notice:", e);
+      return false;
     }
   };
 
@@ -399,7 +475,16 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     stopSpeaking();
     if (messageId) setPlayingMsgId(messageId);
 
-    // 0. ZERO DELAY INSTANT PLAYBACK: Play pre-generated Cloudinary / Sarvam audio URL directly!
+    const textToSpeak = stripEmojis(text);
+    if (!textToSpeak) return;
+
+    // 1ST PRIORITY: Browser Google Speech Synthesis (Instant, Fast, 0ms network latency!)
+    const browserSpoke = speakWithBrowserGoogle(textToSpeak, language);
+    if (browserSpoke) {
+      return;
+    }
+
+    // 2ND PRIORITY: Pre-generated Cloudinary / Sarvam audio URL (if device lacks native Kannada voice)
     if (audioUrl) {
       try {
         const audio = new Audio(audioUrl);
@@ -411,7 +496,6 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         audio.onerror = () => {
           updateSpeakingState(false);
           setPlayingMsgId(null);
-          fallbackBrowserSpeak(text);
         };
         activeAudioRef.current = audio;
         await audio.play();
@@ -421,12 +505,12 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       }
     }
 
+    // 3RD PRIORITY: Sarvam AI Indic TTS (/api/tts)
     try {
-      // 1. Generate natural speech using Sarvam AI TTS
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, language })
+        body: JSON.stringify({ text: textToSpeak, language })
       });
 
       const contentType = res.headers.get('content-type') || '';
@@ -442,7 +526,6 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           audio.onerror = () => {
             updateSpeakingState(false);
             setPlayingMsgId(null);
-            fallbackBrowserSpeak(text);
           };
           activeAudioRef.current = audio;
           await audio.play();
@@ -452,9 +535,6 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     } catch (err) {
       console.warn("Sarvam TTS request notice (using browser speech fallback):", err);
     }
-
-    // 2. Fallback to browser SpeechSynthesis
-    fallbackBrowserSpeak(text);
   };
 
   const stopListeningAndSend = async () => {
@@ -588,6 +668,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       content: m.text
     }));
 
+    const userTurnCount = messages.filter(m => m.sender === 'user').length + 1;
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -596,7 +678,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           message: queryText, 
           history: recentHistory,
           language, 
-          profile 
+          profile,
+          chatCount: userTurnCount
         })
       });
 
@@ -613,6 +696,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       }
       
       const assistantReply = data.response || "I have received your query. How else may I assist you?";
+      const spokenVoiceText = data.spokenText || assistantReply;
       const assistantMsg: VoiceInteraction = { 
         id: (Date.now() + 1).toString(), 
         text: assistantReply, 
@@ -622,19 +706,23 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       };
       
       setMessages(prev => [...prev, assistantMsg]);
-      speak(assistantReply, data.audioUrl, assistantMsg.id);
+      speak(spokenVoiceText, data.audioUrl, assistantMsg.id);
 
       // Detect if AI suggested a complaint
       if (data.isComplaintDraft) {
-        setComplaintDraft({ query: queryText, media: [] });
+        setComplaintDraft({ 
+          query: queryText, 
+          markdownReport: data.markdownReport || assistantReply,
+          media: [] 
+        });
       }
     } catch (error: any) { 
       console.error("Chat error:", error);
-      let errorText = "I'm having trouble connecting to the AI service. Please verify your API key (GROQ_API_KEY) in Vercel environment settings.";
-      if (language === 'Kannada' || language === 'kn-IN') {
-        errorText = "ಸಂಪರ್ಕಿಸುವಲ್ಲಿ ಸಮಸ್ಯೆ ಉಂಟಾಗಿದೆ. ದಯವಿಟ್ಟು Vercel ಪರಿರಚನೆಯಲ್ಲಿ ನಿಮ್ಮ API ಕೀಲಿಯನ್ನು (GROQ_API_KEY) ಪರಿಶೀಲಿಸಿ.";
-      } else if (language === 'Hindi' || language === 'hi-IN') {
-        errorText = "कनेक्ट करने में समस्या आ रही है। कृपया Vercel सेटिंग्स में अपनी API कुंजी (GROQ_API_KEY) की जाँच करें।";
+      let errorText = "I'm having trouble connecting to the AI service. Please try again shortly.";
+      if (language === 'Kannada') {
+        errorText = "ಕ್ಷಮಿಸಿ, ಸೇವೆಯನ್ನು ಸಂಪರ್ಕಿಸುವಲ್ಲಿ ಅಡಚಣೆ ಉಂಟಾಗಿದೆ. ದಯವಿಟ್ಟು ಸ್ವಲ್ಪ ಸಮಯದ ನಂತರ ಪುನಃ ಪ್ರಯತ್ನಿಸಿ.";
+      } else if (language === 'Hindi') {
+        errorText = "माफ़ कीजिए, सेवा से कनेक्ट करने में समस्या आ रही है। कृपया थोड़ी देर बाद पुनः प्रयास करें।";
       }
 
       const fallbackMsg: VoiceInteraction = {
@@ -661,7 +749,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       name: profile.name || 'Anonymous',
       phoneNumber: profile.phone || 'N/A',
       location: profile.location || '',
-      query: complaintDraft.query,
+      query: complaintDraft.markdownReport || complaintDraft.query,
       status: 'pending',
       chatHistory: messages,
       mediaUrls: complaintDraft.media,
@@ -710,7 +798,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="flex flex-col h-[calc(100vh-8rem)] max-w-lg mx-auto relative px-3 sm:px-4"
+      className="flex flex-col h-[calc(100vh-5.5rem)] max-w-lg mx-auto relative px-3 sm:px-4"
     >
       {/* Mic Error Banner */}
       {micError && (
@@ -736,8 +824,24 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             transition={{ duration: 0.3 }}
             className="flex-1 flex flex-col items-center justify-between py-2 min-h-0"
           >
-            {/* Top Language Switcher Bar */}
-            <div className="shrink-0 flex justify-center gap-1.5 p-1 bg-white/80 backdrop-blur-xl rounded-2xl border border-slate-200 shadow-sm w-fit mx-auto mt-1">
+            {/* Massive PEPERO Font Style Wordmark: VOX-ASSIST */}
+            <div className="shrink-0 pt-2 pb-0 text-center select-none flex justify-center">
+              <h1 
+                className="font-brand-display tracking-tighter text-white drop-shadow-md transform -skew-x-6 inline-block"
+                style={{
+                  width: '333.362px',
+                  height: '108.0057px',
+                  fontSize: '88px',
+                  textAlign: 'left',
+                  lineHeight: '70px',
+                }}
+              >
+                VOX-ASSIST
+              </h1>
+            </div>
+
+            {/* Language Switcher Bar */}
+            <div className="shrink-0 flex justify-center gap-1.5 p-1 bg-white/20 backdrop-blur-xl rounded-2xl border border-white/30 shadow-md w-fit mx-auto mt-1 mb-2">
               {(['English', 'Hindi', 'Kannada'] as const).map((lang) => {
                 const labelMap = { English: 'English', Hindi: 'हिन्दी', Kannada: 'ಕನ್ನಡ' };
                 return (
@@ -747,10 +851,10 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                       setLanguage(lang);
                       if (synthRef.current) synthRef.current.cancel();
                     }}
-                    className={`px-3.5 py-1.5 rounded-xl text-[11px] font-bold tracking-wide transition-all ${
+                    className={`px-3.5 py-1.5 rounded-xl text-xs font-bold tracking-wide transition-all ${
                       language === lang 
-                        ? 'bg-indigo-600 text-white shadow-md shadow-indigo-200' 
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                        ? 'bg-white text-rose-600 shadow-md font-black scale-[1.02]' 
+                        : 'text-white/80 hover:text-white hover:bg-white/10'
                     }`}
                   >
                     {labelMap[lang]}
@@ -760,7 +864,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             </div>
 
             {/* Middle Big 3D Sphere */}
-            <div className="flex-1 flex flex-col items-center justify-center py-4 space-y-4">
+            <div className="flex-1 flex flex-col items-center justify-center py-2 space-y-3">
               <ParticleBall
                 isListening={isListening}
                 isSpeaking={isSpeaking}
@@ -771,7 +875,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               />
 
               <div className="text-center max-w-sm px-2">
-                <h2 className="text-lg sm:text-xl font-bold text-slate-900 tracking-tight">
+                <h2 className="text-lg sm:text-xl font-bold text-white tracking-tight drop-shadow-sm">
                   {isListening 
                     ? "Listening to your voice..." 
                     : isSpeaking 
@@ -786,16 +890,12 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                       key={transcript || (isListening ? 'listening' : 'idle')}
                       initial={{ opacity: 0, y: 4 }}
                       animate={{ opacity: 1, y: 0 }}
-                      className="text-indigo-600 font-bold text-xs tracking-wide px-2"
+                      className="text-white/95 font-bold text-xs tracking-wide px-2"
                     >
                       {transcript || (
                         isListening 
                           ? "Listening... Speak your query clearly" 
-                          : (language === 'Kannada' 
-                              ? "ಧ್ವನಿ ಮೂಲಕ ಮಾತನಾಡಲು ಗೋಳವನ್ನು ಟ್ಯಾಪ್ ಮಾಡಿ" 
-                              : language === 'Hindi' 
-                              ? "बोलने के लिए गोले पर टैप करें" 
-                              : "Tap sphere above or type below to send message")
+                          : ""
                       )}
                     </motion.p>
                   </AnimatePresence>
@@ -807,7 +907,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             {hasMessages && (
               <button
                 onClick={() => setIsMinimized(false)}
-                className="shrink-0 mb-1 px-4 py-1.5 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-sm transition-all"
+                className="shrink-0 mb-2 px-4 py-2 bg-white/25 hover:bg-white/35 backdrop-blur-xl border border-white/40 text-white text-xs font-bold rounded-2xl flex items-center gap-1.5 shadow-md transition-all"
               >
                 <span>View Chat History ({messages.length})</span>
                 <ChevronUp size={14} />
@@ -827,7 +927,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             className="flex-1 flex flex-col min-h-0"
           >
             {/* Top Compact Header: Small Sphere + Clear Eng/Hi/Kan + Corner Minimize Button */}
-            <div className="shrink-0 flex items-center justify-between gap-2 p-2 bg-white/95 backdrop-blur-xl rounded-2xl border border-slate-200/90 shadow-sm z-10 mb-1">
+            <div className="shrink-0 flex items-center justify-between gap-2 p-2 bg-white/20 backdrop-blur-xl rounded-2xl border border-white/30 shadow-md z-10 mb-1">
               <div className="flex items-center gap-2">
                 <ParticleBall
                   isListening={isListening}
@@ -838,11 +938,11 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                   compact={true}
                 />
                 <div>
-                  <h3 className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                    <span>VoxAssist AI</span>
-                    {isListening && <span className="w-2 h-2 rounded-full bg-red-500 animate-ping inline-block" />}
+                  <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <span className="font-brand-display text-base text-white tracking-tight">VOX-ASSIST</span>
+                    {isListening && <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping inline-block" />}
                   </h3>
-                  <p className="text-[10px] text-indigo-600 font-bold truncate max-w-[110px] sm:max-w-[150px]">
+                  <p className="text-[10px] text-white/90 font-bold truncate max-w-[110px] sm:max-w-[150px]">
                     {transcript || (
                       isListening 
                         ? "Listening..." 
@@ -858,7 +958,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
               <div className="flex items-center gap-1.5">
                 {/* Clear Eng | Hi | Kan Language Switcher */}
-                <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-xl border border-slate-200/60">
+                <div className="flex items-center gap-1 p-0.5 bg-white/20 rounded-xl border border-white/30">
                   {(['English', 'Hindi', 'Kannada'] as const).map((lang) => {
                     const labelMap = { English: 'Eng', Hindi: 'Hi', Kannada: 'Kan' };
                     return (
@@ -870,8 +970,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                         }}
                         className={`px-2 py-1 rounded-lg text-[10px] sm:text-xs font-bold transition-all ${
                           language === lang 
-                            ? 'bg-indigo-600 text-white shadow-xs' 
-                            : 'text-slate-600 hover:text-slate-900 hover:bg-white'
+                            ? 'bg-white text-rose-600 shadow-sm' 
+                            : 'text-white/80 hover:text-white hover:bg-white/15'
                         }`}
                         title={`Switch to ${lang}`}
                       >
@@ -884,10 +984,10 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                 {/* Corner Minimize Button */}
                 <button
                   onClick={() => setIsMinimized(true)}
-                  className="p-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 transition-colors border border-slate-200"
+                  className="p-1.5 rounded-xl bg-white/20 hover:bg-white/30 text-white transition-colors border border-white/30"
                   title="Minimize chat to main sphere"
                 >
-                  <ChevronDown size={16} />
+                  <ChevronDown size={17} />
                 </button>
               </div>
             </div>
@@ -901,14 +1001,20 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                     initial={{ opacity: 0, y: 14, scale: 0.96 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     transition={{ duration: 0.25, ease: 'easeOut' }}
-                    className={`p-3.5 rounded-2xl max-w-[88%] shadow-sm ${
+                    className={`p-3.5 rounded-2xl max-w-[88%] shadow-lg transition-all ${
                       m.sender === 'user' 
-                      ? 'bg-indigo-600 text-white self-end shadow-indigo-100 rounded-br-xs' 
-                      : 'bg-white text-slate-800 self-start border border-slate-200/80 rounded-bl-xs'
+                      ? 'bg-white/25 backdrop-blur-xl border border-white/35 text-white self-end shadow-black/10 rounded-br-xs' 
+                      : 'bg-white/15 backdrop-blur-2xl border border-white/25 text-white self-start shadow-black/10 rounded-bl-xs'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-2">
-                      <p className="text-xs sm:text-sm font-medium leading-relaxed">{m.text}</p>
+                      <div className="flex-1 min-w-0">
+                        {m.sender === 'assistant' && (m.text.includes('# ') || m.text.includes('### ') || m.text.includes('| Parameter |') || m.text.includes('|---')) ? (
+                          <RenderedMarkdown content={m.text} variant="glass" />
+                        ) : (
+                          <p className="text-xs sm:text-sm font-medium leading-relaxed whitespace-pre-wrap text-white">{m.text}</p>
+                        )}
+                      </div>
                       {m.sender === 'assistant' && (
                         <button 
                           onClick={() => {
@@ -920,8 +1026,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                           }}
                           className={`p-1.5 rounded-xl transition-all shrink-0 flex items-center gap-1 font-bold text-[10px] ${
                             isSpeaking && playingMsgId === m.id
-                              ? 'bg-rose-100 text-rose-700 border border-rose-300 animate-pulse shadow-xs'
-                              : 'text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50'
+                              ? 'bg-white text-rose-600 border border-white animate-pulse shadow-sm'
+                              : 'text-white/80 hover:text-white bg-white/15 hover:bg-white/25 border border-white/20'
                           }`}
                           title={isSpeaking && playingMsgId === m.id ? "Mute / Stop Audio" : "Play Voice Answer"}
                         >
@@ -936,17 +1042,17 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                         </button>
                       )}
                     </div>
-                    <div className={`text-[9px] font-bold uppercase tracking-wider mt-1.5 opacity-60 ${m.sender === 'user' ? 'text-right text-indigo-100' : 'text-left text-slate-400'}`}>
-                      {m.sender === 'user' ? (profile.name || 'You') : 'VoxAssist AI'} • {new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    <div className={`text-[9px] font-bold uppercase tracking-wider mt-1.5 opacity-70 ${m.sender === 'user' ? 'text-right text-white/80' : 'text-left text-white/70'}`}>
+                      {m.sender === 'user' ? (profile.name || 'You') : 'VOX-ASSIST'} • {new Date(m.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                     </div>
                   </motion.div>
                 ))}
               </AnimatePresence>
 
               {isLoading && (
-                <div className="flex items-center gap-2 bg-white w-fit px-3.5 py-2.5 rounded-2xl border border-slate-200 shadow-sm text-indigo-600 self-start">
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                  <span className="text-[11px] font-bold uppercase tracking-wider">Generating answer...</span>
+                <div className="flex items-center gap-2 bg-white/20 backdrop-blur-xl w-fit px-3.5 py-2.5 rounded-2xl border border-white/30 shadow-md text-white self-start">
+                  <Loader2 className="w-4 h-4 animate-spin text-white" />
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-white">Generating answer...</span>
                 </div>
               )}
 
@@ -956,8 +1062,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         )}
       </AnimatePresence>
 
-      {/* STICKY BOTTOM CHAT INPUT BAR: High-contrast, ultra-visible while typing */}
-      <div className="shrink-0 sticky bottom-0 bg-slate-50/95 backdrop-blur-md pt-2 pb-1 space-y-2 border-t border-slate-200/80 z-20">
+      {/* BOTTOM CHAT & MIC BAR: 100% Glassmorphism, NO white background */}
+      <div className="shrink-0 sticky bottom-0 bg-transparent pt-2 pb-1 space-y-2 z-20">
         {/* Complaint Drafting Box */}
         {complaintDraft && (
           <motion.div 
@@ -987,6 +1093,12 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
                 onChange={handleMediaUpload}
               />
             </div>
+
+            {complaintDraft.markdownReport && (
+              <div className="bg-white/95 p-3 rounded-xl border border-amber-200 shadow-2xs max-h-56 overflow-y-auto">
+                <RenderedMarkdown content={complaintDraft.markdownReport} />
+              </div>
+            )}
 
             {complaintDraft.media.length > 0 && (
               <div className="flex flex-wrap gap-2">
@@ -1019,7 +1131,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           </motion.div>
         )}
 
-        {/* High-Contrast Visible Chat Input Box */}
+        {/* Glassmorphic Transparent Chat Input & Mic Form */}
         <form 
           onSubmit={(e) => {
             e.preventDefault();
@@ -1028,7 +1140,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               handleSendMessage(manualText);
             }
           }}
-          className="flex items-center gap-2 bg-white p-2 sm:p-2.5 rounded-2xl border-2 border-indigo-500/90 shadow-xl shadow-indigo-100/70 focus-within:border-indigo-600 focus-within:ring-2 focus-within:ring-indigo-300 transition-all"
+          className="flex items-center gap-2 bg-white/15 backdrop-blur-2xl p-1.5 sm:p-2 rounded-2xl border border-white/30 shadow-xl shadow-black/10 focus-within:border-white/60 focus-within:bg-white/20 transition-all"
         >
           <button
             type="button"
@@ -1038,8 +1150,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             }}
             className={`p-2.5 rounded-xl transition-all ${
               isListening 
-                ? 'bg-red-500 text-white animate-pulse shadow-md shadow-red-200' 
-                : 'bg-indigo-50 text-indigo-600 border border-indigo-200 hover:bg-indigo-100 active:scale-95'
+                ? 'bg-rose-500 text-white animate-pulse shadow-md shadow-rose-900/30' 
+                : 'bg-white/20 hover:bg-white/30 text-white border border-white/30 active:scale-95'
             }`}
             title={isListening ? "Stop Listening" : "Start Voice Input"}
           >
@@ -1057,13 +1169,13 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             }
             value={manualText}
             onChange={(e) => setManualText(e.target.value)}
-            className="flex-1 bg-slate-50 focus:bg-white px-3 py-2 text-xs sm:text-sm font-semibold text-slate-900 placeholder-slate-400 focus:outline-none rounded-xl border border-slate-200 focus:border-indigo-500 transition-all"
+            className="flex-1 bg-transparent px-3 py-2 text-xs sm:text-sm font-semibold text-white placeholder-white/65 focus:outline-none border-none"
           />
 
           <button
             type="submit"
             disabled={!manualText.trim() || isLoading}
-            className="p-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-xl transition-all disabled:opacity-40 shadow-md shadow-indigo-200 flex items-center justify-center shrink-0"
+            className="p-2.5 bg-white/25 hover:bg-white/35 active:scale-95 text-white rounded-xl transition-all disabled:opacity-40 border border-white/30 shadow-md flex items-center justify-center shrink-0 cursor-pointer"
           >
             <Send size={16} />
           </button>
@@ -1071,9 +1183,9 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
         {/* Identity Alert */}
         {!profile.name && (
-          <div className="bg-indigo-50/70 p-2 rounded-xl border border-indigo-100 flex items-center gap-2">
-            <Sparkles size={14} className="text-indigo-600 shrink-0" />
-            <p className="text-[10px] text-indigo-900 font-medium">
+          <div className="bg-white/15 backdrop-blur-md p-2 rounded-xl border border-white/25 flex items-center gap-2 shadow-sm text-white">
+            <Sparkles size={14} className="text-white shrink-0" />
+            <p className="text-[10px] text-white/90 font-medium">
               Tip: Set your name and phone in profile to personalize answers.
             </p>
           </div>

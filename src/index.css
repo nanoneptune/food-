@@ -1,1 +1,15 @@
 @import "tailwindcss";
+
+@layer utilities {
+  .font-brand-display {
+    font-family: 'Barlow Condensed', 'Anton', sans-serif;
+    font-style: italic;
+    font-weight: 900;
+    text-transform: uppercase;
+  }
+}
+
+.bg-pepero-gradient {
+  background: linear-gradient(168deg, #ff3f65 0%, #ed1941 45%, #c80d30 100%);
+  background-attachment: fixed;
+}

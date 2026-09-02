@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Complaint, VoiceInteraction } from '../types';
+import { RenderedMarkdown } from './RenderedMarkdown';
 
 export default function Dashboard() {
   const [complaints, setComplaints] = useState<Complaint[]>([]);
@@ -482,11 +483,17 @@ export default function Dashboard() {
                 {/* Reported Issue Section */}
                 <div className="space-y-1.5">
                   <h4 className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                    Customer's Reported Issue
+                    Customer's Reported Issue & Grievance Dossier
                   </h4>
-                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 text-slate-800 text-xs font-semibold leading-relaxed">
-                    "{selectedComplaint.query}"
-                  </div>
+                  {selectedComplaint.query && (selectedComplaint.query.includes('# ') || selectedComplaint.query.includes('### ') || selectedComplaint.query.includes('| Parameter |') || selectedComplaint.query.includes('|---')) ? (
+                    <div className="p-4 bg-slate-50/80 rounded-2xl border border-slate-200">
+                      <RenderedMarkdown content={selectedComplaint.query} />
+                    </div>
+                  ) : (
+                    <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 text-slate-800 text-xs font-semibold leading-relaxed">
+                      "{selectedComplaint.query}"
+                    </div>
+                  )}
                 </div>
 
                 {/* Voice Audio Recording */}
