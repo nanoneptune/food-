@@ -83,7 +83,41 @@ async function runLLMGeneration({
     }
   }
 
-  // 1. Primary Option: Active Groq Fast LLMs (Ultra-low latency)
+  // 1. Primary Option: Google Gemini 2.5 Flash (1st Priority for Multimodal AI)
+  const geminiKeys = [
+    process.env.GEMINI_API_KEY,
+    process.env.GOOGLE_GENAI_API_KEY,
+    "AQ.Ab8RN6JVU7-hudYEChpcOffZLuDhTY-KbutW2lMCKvtrtOuR0Q"
+  ].filter(Boolean) as string[];
+
+  for (const gKey of geminiKeys) {
+    if (!gKey || gKey === "YOUR_GEMINI_API_KEY") continue;
+    try {
+      const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${gKey}`;
+      const geminiRes = await fetchWithTimeout(restUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: formattedMessages.map((m: any) => ({
+            role: m.role === "assistant" ? "model" : (m.role === "system" ? "user" : m.role),
+            parts: [{ text: String(m.content || "") }]
+          }))
+        })
+      }, 10000);
+
+      if (geminiRes.ok) {
+        const data: any = await geminiRes.json();
+        const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (reply && reply.trim()) {
+          return reply.trim();
+        }
+      }
+    } catch (gErr) {
+      // Try next
+    }
+  }
+
+  // 2. Backup Option: Active Groq Fast LLMs
   const groqKeys = [
     process.env.GROQ_API_KEY,
     "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"
@@ -949,7 +983,49 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
     else if (language === "Kannada" || language === "kn-IN") targetLang = "kn-IN";
     else if (language === "English" || language === "en-IN") targetLang = "en-IN";
 
-    // 1. Try Sarvam AI Saaras STT
+    const isKannada = language === "Kannada" || language === "kn-IN" || targetLang === "kn-IN";
+
+    // 1. First Priority: Gemini 2.5 Flash Multimodal Audio Transcription (English, Hindi, Kannada)
+    const geminiKey = process.env.GEMINI_API_KEY || "AQ.Ab8RN6JVU7-hudYEChpcOffZLuDhTY-KbutW2lMCKvtrtOuR0Q";
+    if (geminiKey) {
+      try {
+        const audioBase64 = req.file.buffer.toString("base64");
+        const mimeType = req.file.mimetype || "audio/webm";
+        let langInstruction = "Transcribe this audio accurately. Return ONLY the transcribed spoken text without commentary.";
+        if (isKannada) {
+          langInstruction = "Transcribe this Kannada audio accurately in Kannada script. Return ONLY the transcribed text.";
+        } else if (language === "Hindi" || language === "hi-IN") {
+          langInstruction = "Transcribe this Hindi audio accurately in Devanagari script. Return ONLY the transcribed text.";
+        }
+
+        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
+        const restRes = await fetchWithTimeout(restUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { inline_data: { mime_type: mimeType, data: audioBase64 } },
+                { text: langInstruction }
+              ]
+            }]
+          })
+        }, 12000);
+
+        if (restRes.ok) {
+          const restData: any = await restRes.json();
+          const text = restData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          if (text && !isHallucinatedTranscript(text)) {
+            console.log(`[STT Success] Gemini Flash 2.5 transcribed (${language || 'English'}): "${text}"`);
+            return res.json({ transcript: text, provider: "gemini-flash" });
+          }
+        }
+      } catch (geminiErr: any) {
+        console.warn("Gemini 2.5 Flash STT notice:", geminiErr?.message);
+      }
+    }
+
+    // 2. Second Priority: Sarvam AI Saaras STT (Tuned Indic STT)
     if (sarvamKey && sarvamKey !== "YOUR_SARVAM_API_KEY") {
       try {
         const formData = new FormData();
@@ -1008,8 +1084,7 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
       }
     }
 
-    // 2. Try Groq Whisper STT (whisper-large-v3-turbo) - ONLY for non-Kannada (English/Hindi) as Groq is disabled for Kannada
-    const isKannada = language === "Kannada" || language === "kn-IN" || targetLang === "kn-IN";
+    // 3. Third Priority: Groq Whisper STT (whisper-large-v3-turbo) - ONLY for non-Kannada (English/Hindi)
     if (!isKannada && groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
       try {
         const formData = new FormData();
@@ -1042,45 +1117,6 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
         }
       } catch (groqWhisperErr: any) {
         console.warn("Groq Whisper STT failed:", groqWhisperErr?.message);
-      }
-    }
-
-    // 3. Backup: Gemini API (gemini-2.5-flash) as a final STT fallback if GEMINI_API_KEY is available
-    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY || process.env.API_KEY;
-    if (geminiKey && geminiKey !== "YOUR_GEMINI_API_KEY") {
-      try {
-        const audioBase64 = req.file.buffer.toString("base64");
-        const mimeType = req.file.mimetype || "audio/webm";
-        let langInstruction = "Transcribe this audio accurately.";
-        if (isKannada) {
-          langInstruction = "Transcribe this Kannada audio accurately, in Kannada script.";
-        } else if (language === "Hindi" || language === "hi-IN") {
-          langInstruction = "Transcribe this Hindi audio accurately, in Devanagari script.";
-        }
-
-        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-        const restRes = await fetchWithTimeout(restUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { inline_data: { mime_type: mimeType, data: audioBase64 } },
-                { text: langInstruction }
-              ]
-            }]
-          })
-        }, 12000);
-
-        if (restRes.ok) {
-          const restData: any = await restRes.json();
-          const text = restData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-          if (text && !isHallucinatedTranscript(text)) {
-            return res.json({ transcript: text, provider: "gemini-flash" });
-          }
-        }
-      } catch (geminiErr: any) {
-        console.warn("Gemini STT backup notice:", geminiErr?.message);
       }
     }
 
