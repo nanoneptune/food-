@@ -848,8 +848,6 @@ Customer Profile:
 - Phone: ${profile?.phone || "Not provided"}
 - Location: ${profile?.location || "Not specified"}
 
-CONVERSATION TURN COUNT IN THIS SESSION: ${turnCount}
-
 KNOWLEDGE BASE CONTEXT (Menus, policies, items, pricing, rules recognized from admin documents):
 """
 ${effectiveContext || "No custom knowledge documents uploaded yet."}
@@ -857,22 +855,26 @@ ${effectiveContext || "No custom knowledge documents uploaded yet."}
 
 TARGET RESPONSE LANGUAGE: ${language || "English"}.
 
-STRICT CONVERSATION & COMPLAINT RULES:
-1. STRICT 4-CONVERSATION THRESHOLD:
-   - You are STRICTLY FORBIDDEN from asking, proposing, or offering to register a complaint if the conversation turn count is LESS THAN 4 (turnCount < 4).
-   - If turnCount < 4: Answer questions, provide helpful guidance, explain food items or policies, sympathize politely with any distress, but DO NOT ask to file or register a formal complaint yet.
-2. INFORMATION GATHERING BEFORE COMPLAINT:
-   - If turnCount >= 4 AND the customer reports an unresolved grievance, food quality issue, hygiene violation, or wants to register a complaint:
-     BEFORE creating or confirming the complaint, you MUST verify that you have collected:
-     a) CAUSE: Exactly what happened or went wrong (e.g. foul smell, foreign object, undercooked food, contamination, delayed delivery).
-     b) WHERE / LOCATION: The specific outlet name, branch, restaurant, or delivery location.
-     c) ALL NEEDED INFORMATION: Food item name, date/time, affected persons/symptoms if any.
-   - If CAUSE or WHERE is missing: Politely ask the customer for the missing details (e.g. "Could you please tell me where this happened (restaurant/branch name)?" or "Could you clarify what specifically went wrong with the food?"). DO NOT trigger complaint creation until both CAUSE and WHERE are obtained.
-3. HIGHLY DESIGNED MARKDOWN GRIEVANCE REPORT:
-   - Once turnCount >= 4 AND both CAUSE and WHERE are provided:
-     Create a comprehensive, highly designed Markdown report.
-     Use this exact structured layout:
+STRICT CONVERSATION & COMPLAINT FLOW RULES:
+1. GENTLE COMPLAINT GATHERING FLOW:
+   - When the customer reports ANY food quality issue, service grievance, or hygiene violation, immediately activate the COMPLAINT GATHERING FLOW (no turn limits).
+   - You MUST politely, warmly, and empathetically ask the customer for the following three key details (ask them naturally and politely, one question at a time if they are not already mentioned):
+     a) WHERE: The specific outlet name, restaurant, branch, or delivery location.
+     b) WHEN: The date and approximate time of the incident.
+     c) CAUSES / DETAILS: Exactly what happened, what went wrong, and any affected dishes/items.
+   - Speak with absolute politeness and high empathy.
+   - When speaking Kannada, ALWAYS use polite and respectful honorifics (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ, ತಿಳಿಸಿಕೊಡಿ, ಕ್ಷಮಿಸಿ).
+   
+2. COMPLAINT CONCLUSION & FAREWELL SIGN-OFF:
+   - Once the user has provided WHERE, WHEN, and CAUSE/DETAILS:
+     a) Generate a comprehensive, highly designed Markdown report using the exact structure below.
+     b) In the spoken portion (1-2 spoken sentences), you MUST say:
+        - In English: "We will take care further. Thank you, ${profile?.name || 'Valued Customer'}! Bye ${profile?.name || ''}, have a nice day!"
+        - In Kannada: "ನಾವು ಮುಂದಿನ ಕ್ರಮವನ್ನು ಕೈಗೊಳ್ಳುತ್ತೇವೆ. ಧನ್ಯವಾದಗಳು, ${profile?.name || 'ಸ್ನೇಹಿತರೇ'}! ಬೈ ${profile?.name || ''}, ತಮ್ಮ ದಿನ ಶುಭವಾಗಿರಲಿ!"
+        - In Hindi: "हम आगे की उचित कार्रवाई करेंगे। धन्यवाद, ${profile?.name || 'प्रिय ग्राहक'}! बाय ${profile?.name || ''}, आपका दिन शुभ हो!"
+     c) Append the token COMPLAINT_DRAFT_REQUEST at the very end of your response.
 
+HIGHLY DESIGNED MARKDOWN GRIEVANCE REPORT STRUCTURE:
 # 📋 Official Consumer Grievance Report
 > **Reference ID:** #GRV-${Date.now().toString().slice(-6)} | **Priority:** High | **Status:** Pending Review
 
@@ -883,7 +885,8 @@ STRICT CONVERSATION & COMPLAINT RULES:
 | :--- | :--- |
 | **Consumer Name** | ${profile?.name || "Valued Consumer"} |
 | **Contact Phone** | ${profile?.phone || "Registered Phone"} |
-| **Incident Location** | [Extracted Location/Branch] |
+| **Incident Location (WHERE)** | [Extracted Location/Branch] |
+| **Incident Timing (WHEN)** | [Extracted Date/Time] |
 | **Target Food Item** | [Extracted Food Item] |
 | **Core Cause / Violation** | [Extracted Root Cause] |
 | **Reported Timestamp** | ${new Date().toLocaleString()} |
@@ -891,7 +894,7 @@ STRICT CONVERSATION & COMPLAINT RULES:
 ---
 
 ### 🔍 Cause & Incident Breakdown
-[Detailed explanation of the cause, symptoms, or service failure]
+[Detailed explanation of the cause, timing, symptoms, or service failure]
 
 ### ⚠️ Hygiene & Safety Compliance Assessment
 - **FSSAI Food Safety Risk:** High concern regarding food handling and storage standards.
@@ -903,10 +906,7 @@ STRICT CONVERSATION & COMPLAINT RULES:
 3. Managerial follow-up within 24 hours.
 
 ---
-*Report generated by VoxAssist AI Governance Protocol*
-
-     Accompany this markdown report with 1 short, polite spoken sentence in ${language || "English"}, and append the token COMPLAINT_DRAFT_REQUEST at the very end of your response.
-4. Spoken tone: Always maintain a calm, pleasant, respectful, and reassuring tone. Keep the spoken portion natural and concise (1-2 sentences).`;
+*Report generated by VoxAssist AI Governance Protocol*`;
 
     const conversationHistory = Array.isArray(history) && history.length > 0
       ? history.slice(-8).map((h: any) => ({
@@ -1110,21 +1110,22 @@ ${updatedData.audioNoteUrl ? `**Voice Note Attached (MP3):** [Play Voice Evidenc
       }
 
       if (isKannada) {
-        replyText = `ತಮ್ಮ ದೂರು ಸಂಖ್ಯೆ ${caseId} ಯಶಸ್ವಿಯಾಗಿ ನೋಂದಾಯಿಸಲ್ಪಟ್ಟಿದೆ. ನಮ್ಮ ಸಹಾಯವಾಣಿಯನ್ನು ಸಂಪರ್ಕಿಸಿದ್ದಕ್ಕಾಗಿ ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ತಮಗೆ ಶುಭ ದಿನ!`;
+        replyText = `ನಿಮ್ಮ ದೂರು ಸಂಖ್ಯೆ ${caseId} ಯಶಸ್ವಿಯಾಗಿ ನೋಂದಾಯಿಸಲ್ಪಟ್ಟಿದೆ. ನಾವು ಮುಂದಿನ ಕ್ರಮವನ್ನು ಕೈಗೊಳ್ಳುತ್ತೇವೆ. ಧನ್ಯವಾದಗಳು, ${profile?.name || 'ಸ್ನೇಹಿತರೇ'}! ಬೈ ${profile?.name || ''}, ತಮ್ಮ ದಿನ ಶುಭವಾಗಿರಲಿ!`;
       } else if (isHindi) {
-        replyText = `आपकी शिकायत संख्या ${caseId} सफलतापूर्वक दर्ज कर ली गई है। कॉल करने के लिए धन्यवाद। आपका दिन शुभ हो!`;
+        replyText = `आपकी शिकायत संख्या ${caseId} सफलतापूर्वक दर्ज कर ली गई है। हम आगे की उचित कार्रवाई करेंगे। धन्यवाद, ${profile?.name || 'प्रिय ग्राहक'}! बाय ${profile?.name || ''}, आपका दिन शुभ हो!`;
       } else {
-        replyText = `Your complaint reference ID ${caseId} has been successfully registered. Thank you for calling. Have a pleasant day!`;
+        replyText = `Your complaint reference ID ${caseId} has been successfully registered. We will take care further. Thank you, ${profile?.name || 'Valued Customer'}! Bye ${profile?.name || ''}, have a nice day!`;
       }
     }
-    // 4. Ongoing conversation to collect information (Cause & Where)
+    // 4. Ongoing conversation to collect information (Where, When, Cause)
     else {
-      // Use LLM to extract cause and location calmly
+      // Use LLM to extract cause, location, and when calmly
       const prompt = `You are a calm, gentle, highly empathetic, and polite IVR Phone Agent for VoxAssist Consumer Helpline.
 User profile: Name: ${profile?.name || "Caller"}, Phone: ${profile?.phone || "On File"}, Location: ${profile?.location || "Not given"}.
 Currently known details:
 - Cause: ${updatedData.cause || "Unknown"}
 - Location/Where: ${updatedData.location || "Unknown"}
+- When: ${updatedData.when || "Unknown"}
 - Item: ${updatedData.item || "Unknown"}
 
 Customer just said: "${message}"
@@ -1132,22 +1133,25 @@ Customer just said: "${message}"
 Language: ${currentLang} (kn-IN for Kannada, hi-IN for Hindi, en-IN for English).
 
 Instructions:
-1. Identify any newly mentioned cause (what went wrong), location (restaurant name, branch, address), or item name.
-2. If the user hasn't specified WHERE (location/restaurant), calmly and politely ask them for the branch/location.
-3. If the user hasn't specified the CAUSE (what was wrong with the food), calmly ask them what specifically happened.
-4. When speaking Kannada, ALWAYS use polite and respectful honorifics (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ, ತಿಳಿಸಿಕೊಡಿ, ಕ್ಷಮಿಸಿ).
-5. If BOTH Cause and Where are now known:
-   Calmly summarize what was noted and state:
+1. Identify any newly mentioned cause (what went wrong/details), location/where (restaurant name, branch, address), when (date or time), or food item name.
+2. If any of the following details are missing, calmly and politely ask the customer for them (one question at a time, with absolute politeness):
+   - WHERE (the specific restaurant, branch, or outlet name)
+   - WHEN (the date and approximate time of the incident)
+   - CAUSE / DETAILS (what was wrong with the food or service)
+3. When speaking Kannada, ALWAYS use polite and respectful honorifics (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ, ತಿಳಿಸಿಕೊಡಿ, ಕ್ಷಮಿಸಿ).
+4. If ALL THREE (Cause, Location/Where, and When) are now known:
+   Calmly summarize the collected details and state:
    "If you would like to record a voice note, press 7. To submit your complaint now, press 9 or say confirm." (in the target language!).
-6. Keep your spoken response to 1-2 calm, reassuring sentences.
+5. Keep your spoken response to 1-2 calm, highly polite, reassuring sentences.
 
 Respond in strict JSON:
 {
   "cause": "updated or existing cause",
   "location": "updated or existing location",
+  "when": "updated or existing when",
   "item": "updated or existing item",
-  "spokenResponse": "1-2 calm sentences to speak to the caller in ${currentLang}",
-  "hasBothCauseAndWhere": true/false
+  "spokenResponse": "1-2 highly polite sentences to speak to the caller in ${currentLang}",
+  "hasRequiredDetails": true/false
 }`;
 
       const aiResponse = await runLLMGeneration({ prompt }) || "{}";
@@ -1160,9 +1164,12 @@ Respond in strict JSON:
 
       if (parsed.cause) updatedData.cause = parsed.cause;
       if (parsed.location) updatedData.location = parsed.location;
+      if (parsed.when) updatedData.when = parsed.when;
       if (parsed.item) updatedData.item = parsed.item;
 
-      if (parsed.hasBothCauseAndWhere || (updatedData.cause && updatedData.location)) {
+      const hasAllDetails = parsed.hasRequiredDetails || (updatedData.cause && updatedData.location && updatedData.when);
+
+      if (hasAllDetails) {
         nextStep = "press_7_prompt";
         if (parsed.spokenResponse) {
           replyText = parsed.spokenResponse;

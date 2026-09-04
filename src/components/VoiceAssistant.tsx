@@ -592,12 +592,20 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     setTranscript('');
     transcriptRef.current = '';
     updateListeningState(true);
-    await startRecording();
-    try {
-      recognitionRef.current?.start();
-    } catch (e) {
-      console.warn("Native recognition start notice (falling back cleanly to audio recorder):", e);
+    
+    // If Web Speech API is supported, use it EXCLUSIVELY to prevent microphone hardware conflicts
+    // especially on Android Chrome where MediaRecorder locks the mic from Google Keyboard Speech.
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.start();
+        return; // Skip MediaRecorder entirely!
+      } catch (e) {
+        console.warn("Native recognition start notice (falling back cleanly to audio recorder):", e);
+      }
     }
+    
+    // Fallback if Web Speech API is missing or failed to start
+    await startRecording();
   };
 
   const toggleListening = async () => {

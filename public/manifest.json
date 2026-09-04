@@ -11,21 +11,15 @@
   "theme_color": "#4f46e5",
   "icons": [
     {
-      "src": "https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png",
-      "type": "image/png",
-      "sizes": "467x534"
-    },
-    {
-      "src": "https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png",
-      "type": "image/png",
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
       "sizes": "512x512",
       "purpose": "any maskable"
     },
     {
-      "src": "https://res.cloudinary.com/plekfmxg/image/upload/v1788167656/00604374-1e49-42f1-b64e-67b9e8a0c594-removebg-preview.png",
-      "type": "image/png",
-      "sizes": "192x192",
-      "purpose": "any maskable"
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "192x192"
     }
   ],
   "id": "vox"

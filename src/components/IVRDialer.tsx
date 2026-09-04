@@ -71,6 +71,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const silence20TimerRef = useRef<any>(null);
   const silence10TimerRef = useRef<any>(null);
   const greetingCancelRef = useRef<boolean>(false);
+  const processingSpeechRef = useRef<boolean>(false);
 
   // Web Audio Context initialization
   const getAudioContext = () => {
@@ -185,11 +186,11 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const handleSilenceWarning = () => {
     clearSilenceTimers();
 
-    let warningText = "We can't hear you. Please speak or press a key.";
+    let warningText = "Say again.";
     if (language === 'kn-IN') {
-      warningText = "ಕ್ಷಮಿಸಿ, ತಮ್ಮ ಧ್ವನಿ ನಮಗೆ ಕೇಳಿಸುತ್ತಿಲ್ಲ. ದಯವಿಟ್ಟು ಮಾತನಾಡಿ ಅಥವಾ ಕೀಪ್ಯಾಡ್‌ನಲ್ಲಿ ಬಟನ್ ಒತ್ತಿ.";
+      warningText = "ಮತ್ತೆ ಹೇಳಿ.";
     } else if (language === 'hi-IN') {
-      warningText = "माफ़ कीजिए, हमें आपकी आवाज़ नहीं सुनाई दे रही है। कृपया कुछ बोलें या कोई बटन दबाएँ।";
+      warningText = "फिर से बोलें।";
     }
 
     speakIVR(warningText, undefined, language, () => {
@@ -204,11 +205,11 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const handleSilenceGoodbye = () => {
     clearSilenceTimers();
 
-    let goodbyeText = "We cannot hear you. Thank you for calling VoxAssist, goodbye.";
+    let goodbyeText = "Bye.";
     if (language === 'kn-IN') {
-      goodbyeText = "ಕ್ಷಮಿಸಿ, ನಮಗೆ ತಮ್ಮ ಧ್ವನಿ ಕೇಳಿಸುತ್ತಿಲ್ಲ. ವೋಕ್ಸ್-ಅಸಿಸ್ಟ್ ಸಹಾಯವಾಣಿಗೆ ಕರೆ ಮಾಡಿದ್ದಕ್ಕಾಗಿ ಧನ್ಯವಾದಗಳು, ನಮಸ್ಕಾರ.";
+      goodbyeText = "ಬೈ.";
     } else if (language === 'hi-IN') {
-      goodbyeText = "माफ़ कीजिए, हमें आपकी आवाज़ नहीं आ रही है। कॉल करने के लिए धन्यवाद, अलविदा।";
+      goodbyeText = "बाय।";
     }
 
     speakIVR(goodbyeText, undefined, language, () => {
@@ -324,12 +325,17 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) return;
 
+    processingSpeechRef.current = false;
+
     try {
       if (speechRecognitionRef.current) {
-        speechRecognitionRef.current.abort();
+        try {
+          speechRecognitionRef.current.abort();
+        } catch {}
       }
 
       const recognition = new SpeechRecognition();
+      // Keep continuous as false to naturally detect sentence pauses, but auto-restart on onend
       recognition.continuous = false;
       recognition.interimResults = false;
       recognition.lang = language;
@@ -342,6 +348,11 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
         const spoken = event.results[0][0]?.transcript?.trim();
         if (spoken) {
           clearSilenceTimers();
+          processingSpeechRef.current = true;
+          try {
+            recognition.abort();
+          } catch {}
+          setIsListening(false);
           handleCallerSpeech(spoken);
         }
       };
@@ -352,6 +363,16 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
       recognition.onend = () => {
         setIsListening(false);
+        // Robust Auto-restart if we didn't get any result and we are still in listening mode
+        if (callActive && !isIvrSpeaking && !isRecordingNote && !greetingCancelRef.current && !processingSpeechRef.current) {
+          setTimeout(() => {
+            if (callActive && !isIvrSpeaking && !isRecordingNote && !greetingCancelRef.current && !processingSpeechRef.current) {
+              try {
+                recognition.start();
+              } catch (e) {}
+            }
+          }, 350);
+        }
       };
 
       speechRecognitionRef.current = recognition;
