@@ -72,6 +72,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   // Silence / Inactivity Timers (20s first warning, then 10s goodbye)
   const silence20TimerRef = useRef<any>(null);
   const silence10TimerRef = useRef<any>(null);
+  const speechSilenceTimerRef = useRef<any>(null);
   const greetingCancelRef = useRef<boolean>(false);
   const processingSpeechRef = useRef<boolean>(false);
   const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
@@ -172,6 +173,10 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     if (silence10TimerRef.current) {
       clearTimeout(silence10TimerRef.current);
       silence10TimerRef.current = null;
+    }
+    if (speechSilenceTimerRef.current) {
+      clearTimeout(speechSilenceTimerRef.current);
+      speechSilenceTimerRef.current = null;
     }
   };
 
@@ -427,19 +432,18 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       recognition.onresult = (event: any) => {
         clearSilenceTimers();
 
-        let interimText = '';
-        let finalText = '';
+        let finalTranscript = '';
+        let interimTranscript = '';
 
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          const resText = event.results[i][0]?.transcript || '';
+        for (let i = 0; i < event.results.length; ++i) {
           if (event.results[i].isFinal) {
-            finalText += (finalText ? ' ' : '') + resText;
+            finalTranscript += event.results[i][0].transcript;
           } else {
-            interimText = resText;
+            interimTranscript += event.results[i][0].transcript;
           }
         }
 
-        const rawSpoken = (finalText || interimText).trim();
+        const rawSpoken = (finalTranscript + interimTranscript).trim();
         const cleanSpoken = rawSpoken
           .replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1')
           .replace(/([\u0900-\u0D7F]+)(?:\s+\1)+/gu, '$1')
@@ -448,18 +452,24 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
         if (cleanSpoken) {
           localCapturedSpoken = cleanSpoken;
           setLastCallerSpoken(cleanSpoken);
-        }
-
-        if (finalText && finalText.trim()) {
-          clearSilenceTimers();
-          processingSpeechRef.current = true;
-          const speechToProcess = cleanSpoken || finalText.trim();
-          localCapturedSpoken = '';
-          try {
-            recognition.abort();
-          } catch {}
-          setIsListening(false);
-          handleCallerSpeech(speechToProcess);
+          
+          // Wait for natural 2.5s silence before concluding user has finished speaking
+          if (speechSilenceTimerRef.current) {
+            clearTimeout(speechSilenceTimerRef.current);
+          }
+          speechSilenceTimerRef.current = setTimeout(() => {
+            if (isListening && !processingSpeechRef.current && localCapturedSpoken) {
+              clearSilenceTimers();
+              processingSpeechRef.current = true;
+              const speechToProcess = localCapturedSpoken;
+              localCapturedSpoken = '';
+              try {
+                recognition.abort();
+              } catch {}
+              setIsListening(false);
+              handleCallerSpeech(speechToProcess);
+            }
+          }, 2500);
         }
       };
 

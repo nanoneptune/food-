@@ -96,75 +96,39 @@ async function runLLMGeneration({
     }
   }
 
-  // 1. Primary Option: High-Speed Vercel AI Gateway (openai/gpt-4o-mini / gpt-4o)
-  const vercelKeys = [
-    "vck_3GaBkIjy2p0dPWns5uvuO7an1KdbnY1bAeIT6WHAXoYSXORqJF1rhJMo",
-    process.env.VERCEL_API_KEY,
-    process.env.OPENAI_API_KEY
-  ].filter(Boolean) as string[];
-
-  const vercelModels = [
-    "openai/gpt-4o-mini",
-    "openai/gpt-4o"
+  // 1. Primary Option: Groq Fast LLM Inference (llama3-70b-8192 / mixtral-8x7b-32768)
+  const groqKey = process.env.GROQ_API_KEY;
+  const groqModels = [
+    "llama3-70b-8192",
+    "llama3-8b-8192",
+    "mixtral-8x7b-32768",
   ];
 
-  for (const vKey of vercelKeys) {
-    if (!vKey || vKey === "YOUR_OPENAI_API_KEY") continue;
-    for (const vModel of vercelModels) {
+  if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
+    for (const model of groqModels) {
       try {
-        const gatewayRes = await fetchWithTimeout("https://ai-gateway.vercel.sh/v1/chat/completions", {
+        const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${vKey}`,
+            "Authorization": `Bearer ${groqKey}`,
           },
           body: JSON.stringify({
-            model: vModel,
+            model: model,
             messages: formattedMessages,
             max_tokens: 600,
           }),
-        }, 5000);
+        }, 8000);
 
-        if (gatewayRes.ok) {
-          const data: any = await gatewayRes.json();
+        if (groqRes.ok) {
+          const data: any = await groqRes.json();
           const reply = data?.choices?.[0]?.message?.content;
           if (reply && reply.trim()) {
             return reply.trim();
           }
         }
       } catch (e: any) {
-        // Try next
-      }
-    }
-  }
-
-  // 2. Secondary Option: Google Gemini Flash
-  const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY;
-  if (geminiKey && !geminiKey.startsWith("AQ.Ab8") && geminiKey !== "YOUR_GEMINI_API_KEY") {
-    const geminiModels = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.8-flash"];
-    for (const modelName of geminiModels) {
-      try {
-        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`;
-        const geminiRes = await fetchWithTimeout(restUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: formattedMessages.map((m: any) => ({
-              role: m.role === "assistant" ? "model" : (m.role === "system" ? "user" : m.role),
-              parts: [{ text: String(m.content || "") }]
-            }))
-          })
-        }, 5000);
-
-        if (geminiRes.ok) {
-          const data: any = await geminiRes.json();
-          const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (reply && reply.trim()) {
-            return reply.trim();
-          }
-        }
-      } catch (gErr) {
-        // Try next model
+        console.warn(`Groq API fallback notice for ${model}:`, e?.message);
       }
     }
   }
@@ -656,53 +620,7 @@ function stripEmojis(text: string): string {
 
 // Helper to generate & upload TTS audio to Cloudinary for instant playback
 async function generateTTSAudioUrl(text: string, language: string): Promise<string | null> {
-  if (!text) return null;
-  try {
-    const sarvamKey = process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW";
-    let targetLang = "en-IN";
-    if (language === "Hindi" || language === "hi-IN") targetLang = "hi-IN";
-    else if (language === "Kannada" || language === "kn-IN") targetLang = "kn-IN";
-
-    const cleanedText = stripEmojis(text);
-    const response = await fetchWithTimeout("https://api.sarvam.ai/text-to-speech", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "api-subscription-key": sarvamKey,
-      },
-      body: JSON.stringify({
-        inputs: [cleanedText.slice(0, 500)],
-        target_language_code: targetLang,
-        speaker: "ritu",
-        model: "bulbul:v3"
-      })
-    }, 8000);
-
-    if (response.ok) {
-      const data: any = await response.json();
-      if (data && data.audios && data.audios[0]) {
-        const audioBase64 = data.audios[0];
-        const dataURI = `data:audio/wav;base64,${audioBase64}`;
-        
-        try {
-          if (process.env.CLOUDINARY_URL || process.env.CLOUDINARY_CLOUD_NAME) {
-            const uploadRes = await cloudinary.uploader.upload(dataURI, {
-              resource_type: "video",
-              folder: "voxassist_voice_cache"
-            });
-            if (uploadRes && uploadRes.secure_url) {
-              return uploadRes.secure_url;
-            }
-          }
-        } catch (cErr: any) {
-          console.warn("Cloudinary audio upload notice:", cErr?.message);
-        }
-        return dataURI;
-      }
-    }
-  } catch (err: any) {
-    console.warn("TTS audio generation error:", err?.message);
-  }
+  // Groq does not have a TTS endpoint. We return null, the client will rely on browser synthesis.
   return null;
 }
 
@@ -1177,7 +1095,7 @@ Respond in strict JSON:
       }
     }
 
-    // Generate high quality TTS using Sarvam female voice (1st priority)
+    // Attempt to generate TTS (currently returns null, relying on browser TTS)
     const audioUrl = await generateTTSAudioUrl(replyText, currentLang);
 
     res.json({
@@ -1197,54 +1115,9 @@ Respond in strict JSON:
 
 // API: Sarvam AI Text-to-Speech (TTS)
 app.post("/api/tts", async (req, res) => {
-  const { text, language } = req.body;
-  if (!text) return res.status(400).json({ error: "Text is required" });
-
-  const sarvamKey = process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW";
-  
-  let targetLang = "en-IN";
-  let speaker = "ritu";
-  if (language === "Hindi" || language === "hi-IN") {
-    targetLang = "hi-IN";
-    speaker = "ritu";
-  } else if (language === "Kannada" || language === "kn-IN") {
-    targetLang = "kn-IN";
-    speaker = "ritu";
-  }
-
-  try {
-    const cleanedText = stripEmojis(text);
-    const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "api-subscription-key": sarvamKey,
-      },
-      body: JSON.stringify({
-        inputs: [cleanedText.slice(0, 500)],
-        target_language_code: targetLang,
-        speaker: speaker,
-        model: "bulbul:v3"
-      })
-    });
-
-    if (!response.ok) {
-      console.warn(`Sarvam TTS status ${response.status}: defaulting to browser Speech Synthesis`);
-      return res.status(response.status).json({ error: "Sarvam TTS service unavailable, defaulting to browser Speech Synthesis" });
-    }
-
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("application/json")) {
-      const data: any = await response.json();
-      if (data && data.audios && data.audios.length > 0) {
-        return res.json({ audioBase64: data.audios[0], audioFormat: "wav" });
-      }
-    }
-    res.status(400).json({ error: "Failed to generate TTS from Sarvam" });
-  } catch (err: any) {
-    console.warn("Sarvam TTS notice:", err?.message || err);
-    res.status(500).json({ error: err.message || "TTS error" });
-  }
+  // Groq does not currently support TTS. 
+  // We return a 501 Not Implemented so the frontend gracefully falls back to browser SpeechSynthesis.
+  res.status(501).json({ error: "Groq TTS not available. Defaulting to browser Speech Synthesis." });
 });
 
 // Helper to detect Whisper hallucinations on silent/quiet audio clips
@@ -1288,121 +1161,28 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
     }
 
     const { language } = req.body;
-    const sarvamKey = process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW";
     const groqKey = process.env.GROQ_API_KEY || "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";
 
-    let targetLang = "unknown";
-    if (language === "Hindi" || language === "hi-IN") targetLang = "hi-IN";
-    else if (language === "Kannada" || language === "kn-IN") targetLang = "kn-IN";
-    else if (language === "English" || language === "en-IN") targetLang = "en-IN";
-
-    const isKannada = language === "Kannada" || language === "kn-IN" || targetLang === "kn-IN";
-
-    // 1. First Priority: Sarvam AI Saaras STT (Specialized Indic STT for Kannada, Hindi & Indian English)
-    if (sarvamKey && sarvamKey !== "YOUR_SARVAM_API_KEY") {
-      try {
-        const formData = new FormData();
-        const rawAudioBuffer = req.file.buffer;
-        const originalMime = req.file.mimetype || "audio/webm";
-        
-        let wavBuffer: Buffer;
-        // Check if buffer is already a valid WAV file (starts with 'RIFF')
-        if (rawAudioBuffer.length > 12 && rawAudioBuffer.toString("ascii", 0, 4) === "RIFF") {
-          wavBuffer = rawAudioBuffer;
-        } else {
-          try {
-            wavBuffer = await convertWebmToWav(rawAudioBuffer);
-          } catch (convErr) {
-            console.warn("Audio conversion notice, attempting raw buffer:", convErr);
-            wavBuffer = rawAudioBuffer;
-          }
-        }
-
-        const fileBlob = new Blob([wavBuffer], { type: "audio/wav" });
-        formData.append("file", fileBlob, "voice.wav");
-        if (targetLang !== "unknown") {
-          formData.append("language_code", targetLang);
-        }
-        formData.append("model", "saaras:v4");
-
-        const response = await fetch("https://api.sarvam.ai/speech-to-text", {
-          method: "POST",
-          headers: {
-            "api-subscription-key": sarvamKey,
-          },
-          body: formData,
-        });
-
-        if (response.ok) {
-          const data: any = await response.json();
-          const text = data?.transcript?.trim();
-          if (text && !isHallucinatedTranscript(text)) {
-            console.log(`[STT Success] Sarvam Saaras v4 transcribed (${language || 'auto'}): "${text}"`);
-            return res.json({ transcript: text, provider: "sarvam" });
-          }
-        } else {
-          const errText = await response.text();
-          console.warn("Sarvam STT non-ok response:", response.status, errText);
-        }
-      } catch (sarvamErr: any) {
-        console.warn("Sarvam STT failed, attempting backup provider:", sarvamErr?.message);
-      }
-    }
-
-    // 2. Second Priority: Gemini Flash Multimodal STT (if valid GEMINI_API_KEY is present)
-    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY;
-    if (geminiKey && !geminiKey.startsWith("AQ.Ab8") && geminiKey !== "YOUR_GEMINI_API_KEY") {
-      try {
-        const audioBase64 = req.file.buffer.toString("base64");
-        const mimeType = req.file.mimetype || "audio/webm";
-        let langInstruction = "Transcribe this audio accurately. Return ONLY the transcribed spoken text without commentary.";
-        if (isKannada) {
-          langInstruction = "Transcribe this Kannada audio accurately in Kannada script. Return ONLY the transcribed text.";
-        } else if (language === "Hindi" || language === "hi-IN") {
-          langInstruction = "Transcribe this Hindi audio accurately in Devanagari script. Return ONLY the transcribed text.";
-        }
-
-        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${geminiKey}`;
-        const restRes = await fetchWithTimeout(restUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { inline_data: { mime_type: mimeType, data: audioBase64 } },
-                { text: langInstruction }
-              ]
-            }]
-          })
-        }, 8000);
-
-        if (restRes.ok) {
-          const restData: any = await restRes.json();
-          const text = restData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-          if (text && !isHallucinatedTranscript(text)) {
-            console.log(`[STT Success] Gemini Flash transcribed (${language || 'English'}): "${text}"`);
-            return res.json({ transcript: text, provider: "gemini-flash" });
-          }
-        }
-      } catch (geminiErr: any) {
-        console.warn("Gemini Flash STT notice:", geminiErr?.message);
-      }
-    }
-
-    // 3. Third Priority: Groq Whisper STT (whisper-large-v3-turbo) - ONLY for non-Kannada (English/Hindi)
-    if (!isKannada && groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
+    if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
       try {
         const formData = new FormData();
         const audioBuffer = req.file.buffer;
         const mime = req.file.mimetype || "audio/webm";
+
         const fileObj = typeof File !== "undefined"
           ? new File([audioBuffer], "voice.webm", { type: mime })
           : new Blob([audioBuffer], { type: mime });
 
         formData.append("file", fileObj as any, "voice.webm");
         formData.append("model", "whisper-large-v3-turbo");
-        if (language === "Hindi" || language === "hi-IN") formData.append("language", "hi");
-        else formData.append("language", "en");
+
+        if (language === "Hindi" || language === "hi-IN") {
+          formData.append("language", "hi");
+        } else if (language === "Kannada" || language === "kn-IN") {
+          formData.append("language", "kn");
+        } else {
+          formData.append("language", "en");
+        }
 
         const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
           method: "POST",
@@ -1416,7 +1196,9 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
         if (contentType.includes("application/json")) {
           const groqData: any = await groqRes.json();
           const text = groqData?.text?.trim();
+
           if (text && !isHallucinatedTranscript(text)) {
+            console.log(`[STT Success] Groq Whisper transcribed (${language || 'en'}): "${text}"`);
             return res.json({ transcript: text, provider: "groq-whisper" });
           }
         }
@@ -1425,7 +1207,7 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
       }
     }
 
-    res.status(200).json({ transcript: "", error: "Could not transcribe audio from speech providers." });
+    res.status(200).json({ transcript: "", error: "Could not transcribe audio using Groq." });
   } catch (err: any) {
     console.error("STT endpoint error:", err);
     res.status(200).json({ transcript: "", error: err.message });

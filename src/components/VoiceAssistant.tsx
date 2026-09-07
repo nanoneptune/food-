@@ -62,6 +62,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const transcriptRef = useRef<string>('');
+  const sessionPrefixRef = useRef<string>('');
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const silenceTimerRef = useRef<any>(null);
   const isListeningRef = useRef<boolean>(false);
@@ -221,7 +222,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             return resolve(null); // Too short to be voice
           }
 
-          // 1. Send recorded audio to high-accuracy server STT (/api/stt: Sarvam AI Saaras -> Groq Whisper -> Gemini STT Backup)
+          // 1. Send recorded audio to high-accuracy server STT (/api/stt: Groq Whisper STT)
           try {
             const formData = new FormData();
             formData.append('audio', audioBlob, 'speech.webm');
@@ -321,19 +322,21 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         };
 
         recognition.onresult = (event: any) => {
-          let fullText = '';
+          let finalTranscript = '';
+          let interimTranscript = '';
+          
           for (let i = 0; i < event.results.length; ++i) {
-            const res = event.results[i];
-            const text = (res[0]?.transcript || '').trim();
-            if (res.isFinal) {
-              if (text) fullText += (fullText ? ' ' : '') + text;
-            } else if (i === event.results.length - 1) {
-              if (text) fullText += (fullText ? ' ' : '') + text;
+            if (event.results[i].isFinal) {
+              finalTranscript += event.results[i][0].transcript;
+            } else {
+              interimTranscript += event.results[i][0].transcript;
             }
           }
 
+          const fullText = (finalTranscript + interimTranscript);
+          
           // Deduplicate consecutive repeated words across languages
-          const cleanText = fullText
+          const cleanText = (sessionPrefixRef.current + " " + fullText)
             .replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1')
             .replace(/([\u0900-\u0D7F]+)(?:\s+\1)+/gu, '$1')
             .trim();
@@ -357,7 +360,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               if (isListeningRef.current && transcriptRef.current.trim()) {
                 stopListeningAndSend();
               }
-            }, 2000);
+            }, 3500);
           }
         };
 
@@ -369,11 +372,14 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         };
 
         recognition.onend = async () => {
-          const capturedText = transcriptRef.current?.trim();
-          if (capturedText && isListeningRef.current) {
-            stopListeningAndSend();
-          } else if (isListeningRef.current) {
-            // Keep listening alive if user is still in listening mode
+          if (isListeningRef.current) {
+            // Chrome abruptly ends recognition when it detects a long pause or no speech.
+            // DO NOT automatically send just because onend fired; instead, accumulate and restart.
+            // Auto-send ONLY occurs if the 3500ms silenceTimer fires.
+            const capturedText = transcriptRef.current?.trim();
+            if (capturedText) {
+              sessionPrefixRef.current = capturedText + " ";
+            }
             try {
               recognition.start();
             } catch {}
@@ -494,7 +500,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       return;
     }
 
-    // 2ND PRIORITY: Pre-generated Cloudinary / Sarvam audio URL (if device lacks native Kannada voice)
+    // 2ND PRIORITY: Pre-generated audio URL (if device lacks native Kannada voice)
     if (audioUrl) {
       try {
         const audio = new Audio(audioUrl);
@@ -515,7 +521,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       }
     }
 
-    // 3RD PRIORITY: Sarvam AI Indic TTS (/api/tts)
+    // 3RD PRIORITY: Server TTS (/api/tts)
     try {
       const res = await fetch('/api/tts', {
         method: 'POST',
@@ -543,7 +549,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         }
       }
     } catch (err) {
-      console.warn("Sarvam TTS request notice (using browser speech fallback):", err);
+      console.warn("Server TTS request notice (using browser speech fallback):", err);
     }
   };
 
@@ -552,6 +558,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
+    sessionPrefixRef.current = '';
     if (vadIntervalRef.current) {
       clearInterval(vadIntervalRef.current);
       vadIntervalRef.current = null;
@@ -607,6 +614,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
     setTranscript('');
     transcriptRef.current = '';
+    sessionPrefixRef.current = '';
     updateListeningState(true);
     
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -632,6 +640,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const toggleListening = async () => {
     // 1. If AI is speaking -> INTERRUPT! Stop speech immediately and start listening to user
     if (isSpeakingRef.current || isSpeaking || activeAudioRef.current) {
+      stopSpeaking();
       await startListeningProcess();
       return;
     }
