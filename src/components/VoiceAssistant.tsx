@@ -409,7 +409,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       }
 
       utterance.lang = targetLangCode;
-      utterance.rate = 1.0;
+      utterance.rate = 1.4; // 1.4X speed as requested
       utterance.pitch = 1.0;
 
       // Find best available voice on the device (prioritize Google keyboard / Android / native voice)
@@ -564,25 +564,31 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
     const browserCaptured = transcriptRef.current.trim();
     
-    // 1ST PRIORITY: Free native Browser Web Speech API (Chrome/Edge/Safari/Android)
+    // 1ST PRIORITY: Free native Browser Web Speech API (Chrome/Edge/Safari/Android/Kotlin-like)
     if (browserCaptured && !isHallucinatedText(browserCaptured)) {
       setTranscript(browserCaptured);
       transcriptRef.current = '';
       handleSendMessage(browserCaptured);
-      // Clean up media recorder state safely in background
-      stopAndTranscribeAudio().catch(() => {});
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        stopAndTranscribeAudio().catch(() => {});
+      }
       return;
     }
 
-    // 2ND PRIORITY: Multi-tier Backend STT (Sarvam AI Saaras -> Gemini Flash -> Groq Whisper)
-    setIsLoading(true);
-    const serverText = await stopAndTranscribeAudio();
-    setIsLoading(false);
+    // 2ND PRIORITY: Backend STT fallback (only if MediaRecorder was used on browsers lacking SpeechRecognition)
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      setIsLoading(true);
+      const serverText = await stopAndTranscribeAudio();
+      setIsLoading(false);
 
-    if (serverText && serverText.trim() && !isHallucinatedText(serverText.trim())) {
-      setTranscript(serverText.trim());
-      transcriptRef.current = '';
-      handleSendMessage(serverText.trim());
+      if (serverText && serverText.trim() && !isHallucinatedText(serverText.trim())) {
+        setTranscript(serverText.trim());
+        transcriptRef.current = '';
+        handleSendMessage(serverText.trim());
+      } else {
+        setTranscript('');
+        transcriptRef.current = '';
+      }
     } else {
       setTranscript('');
       transcriptRef.current = '';
@@ -599,19 +605,22 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     transcriptRef.current = '';
     updateListeningState(true);
     
-    // 1. Start audio recording buffer for high-accuracy Sarvam Saaras backend STT
-    try {
-      await startRecording();
-    } catch (recErr) {
-      console.warn("Audio recorder initialization notice:", recErr);
-    }
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
-    // 2. Also start native browser speech recognition for real-time live preview & instant transcription
-    if (recognitionRef.current) {
+    // Direct Browser Web Speech API (Native, instant, 100% Kotlin-like clean behavior)
+    // Avoid starting MediaRecorder simultaneously to eliminate mic hardware conflict & double "ding ding" sound on Chrome/Android!
+    if (SpeechRecognition && recognitionRef.current) {
       try {
         recognitionRef.current.start();
       } catch (e) {
-        console.warn("Native recognition start notice (audio recorder active):", e);
+        console.warn("Native speech recognition start notice:", e);
+      }
+    } else {
+      // Fallback for browsers without native SpeechRecognition (e.g. Firefox desktop)
+      try {
+        await startRecording();
+      } catch (recErr) {
+        console.warn("Audio recorder initialization notice:", recErr);
       }
     }
   };

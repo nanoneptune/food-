@@ -276,7 +276,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
       const utterance = new SpeechSynthesisUtterance(stripEmojis(text));
       utterance.lang = langCode;
-      utterance.rate = 0.95;
+      utterance.rate = 1.4; // 1.4X speech rate as requested
       utterance.pitch = 1.0;
       if (voiceMatch) utterance.voice = voiceMatch;
 
@@ -476,7 +476,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     }
   };
 
-  // Play Language Prompts 1, 2, 3 in Their Own Respective Languages
+  // Play Language Prompts 1, 2, 3 instantly at 1.4X speed
   const playTrilingualGreeting = async () => {
     greetingCancelRef.current = false;
     clearSilenceTimers();
@@ -487,42 +487,19 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       { text: "For English, press 3.", lang: "en-IN" }
     ];
 
-    // Pre-fetch all 3 audio options in parallel to eliminate inter-phrase latency
-    const audioFetchPromises = options.map(async (opt) => {
-      try {
-        const res = await fetch("/api/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: stripEmojis(opt.text), language: opt.lang })
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.audioBase64) {
-            return `data:audio/wav;base64,${data.audioBase64}`;
-          }
-        }
-      } catch (e) {
-        console.warn("Greeting TTS fetch warning:", e);
-      }
-      return "";
-    });
-
-    const audioUrls = await Promise.all(audioFetchPromises);
-
     for (let i = 0; i < options.length; i++) {
       if (greetingCancelRef.current) break;
       const opt = options[i];
-      const audioUrl = audioUrls[i];
 
       await new Promise<void>((resolve) => {
-        speakIVR(opt.text, audioUrl, opt.lang, () => {
+        speakIVR(opt.text, undefined, opt.lang, () => {
           resolve();
         });
       });
 
-      // Brief 250ms cadence between language options
+      // Brief 200ms cadence between language options
       if (i < options.length - 1 && !greetingCancelRef.current) {
-        await new Promise((r) => setTimeout(r, 250));
+        await new Promise((r) => setTimeout(r, 200));
       }
     }
 
