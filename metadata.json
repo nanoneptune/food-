@@ -1,6 +1,6 @@
 {
-  "name": "VoxAssist AI Voice Assistant",
-  "description": "An AI voice assistant supporting Kannada, Hindi, and English. Upload documents to build a knowledge base, ask questions via voice, and track complaints.",
+  "name": "Food Safety & Standards Inspection Authority",
+  "description": "Official AI Voice Helpline for Food Safety, Hygiene Inspections, and Consumer Grievances in Kannada, Hindi, and English.",
   "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

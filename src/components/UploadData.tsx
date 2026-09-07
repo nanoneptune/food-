@@ -265,11 +265,10 @@ export default function UploadData() {
   };
 
   const promptSuggestions = [
-    "Delete all burger and fast-food menus",
-    "Remove documents with outdated pricing or discounts",
-    "Erase all beverage, coffee, and dessert files",
-    "Delete items uploaded more than 7 days ago",
-    "Clear all knowledge base entries (Wipe database)"
+    "Delete outdated hygiene directives",
+    "Remove files uploaded more than 7 days ago",
+    "Clear old inspection checklists",
+    "Clear all regulatory knowledge base entries (Wipe database)"
   ];
 
   const filteredFiles = files.filter(f => 
@@ -306,7 +305,7 @@ export default function UploadData() {
             <h2 className="text-lg font-bold">Multimodal Knowledge Base</h2>
           </div>
           <p className="text-xs text-indigo-200/90 leading-relaxed max-w-xl">
-            Upload food menus, pricing sheets, PDFs, or photos. OCR recognizes all dishes, ingredients, rules, and prices to train your AI voice assistant instantly.
+            Upload FSSAI directives, food safety guidelines, hygiene standards, or inspection circulars. OCR extracts regulations to train your Food Safety Assistant.
           </p>
         </div>
 
@@ -379,7 +378,7 @@ export default function UploadData() {
         </h3>
         
         <p className="text-slate-400 text-xs font-medium">
-          Drag & drop or click to upload PDF menus, bill receipts, dishes, or policy images
+          Drag & drop or click to upload PDF regulations, FSSAI circulars, hygiene guidelines, or inspection photos
         </p>
 
         <div className="mt-3 flex items-center justify-center gap-2">
@@ -561,7 +560,7 @@ export default function UploadData() {
                         setAiErasePrompt(e.target.value);
                         setEraseAnalysis(null);
                       }}
-                      placeholder="e.g., 'Delete all burger and fry menu entries', 'Erase files uploaded before yesterday', or 'Remove the spicy noodle document'..."
+                      placeholder="e.g., 'Delete outdated circulars uploaded last week', 'Erase old inspection guidelines', or 'Remove draft directives'..."
                       className="w-full p-3.5 text-xs bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 font-medium leading-relaxed"
                     />
                   </div>
@@ -886,7 +885,7 @@ export default function UploadData() {
             <Database size={36} className="mx-auto text-slate-300 mb-3" />
             <p className="text-slate-500 font-bold text-xs uppercase tracking-wider mb-1">No Knowledge Sources Yet</p>
             <p className="text-slate-400 text-[11px] max-w-xs mx-auto">
-              Upload a PDF menu, restaurant policy, or food image to automatically extract and maintain knowledge.
+              Upload FSSAI directives, hygiene rules, or inspection guidelines to train your Food Safety Assistant.
             </p>
           </div>
         )}

@@ -141,28 +141,31 @@ async function runLLMGeneration({
   // 2. Secondary Option: Google Gemini Flash
   const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY;
   if (geminiKey && !geminiKey.startsWith("AQ.Ab8") && geminiKey !== "YOUR_GEMINI_API_KEY") {
-    try {
-      const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${geminiKey}`;
-      const geminiRes = await fetchWithTimeout(restUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: formattedMessages.map((m: any) => ({
-            role: m.role === "assistant" ? "model" : (m.role === "system" ? "user" : m.role),
-            parts: [{ text: String(m.content || "") }]
-          }))
-        })
-      }, 5000);
+    const geminiModels = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.8-flash"];
+    for (const modelName of geminiModels) {
+      try {
+        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${geminiKey}`;
+        const geminiRes = await fetchWithTimeout(restUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: formattedMessages.map((m: any) => ({
+              role: m.role === "assistant" ? "model" : (m.role === "system" ? "user" : m.role),
+              parts: [{ text: String(m.content || "") }]
+            }))
+          })
+        }, 5000);
 
-      if (geminiRes.ok) {
-        const data: any = await geminiRes.json();
-        const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (reply && reply.trim()) {
-          return reply.trim();
+        if (geminiRes.ok) {
+          const data: any = await geminiRes.json();
+          const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (reply && reply.trim()) {
+            return reply.trim();
+          }
         }
+      } catch (gErr) {
+        // Try next model
       }
-    } catch (gErr) {
-      // Try next
     }
   }
 
@@ -725,46 +728,12 @@ app.post("/api/chat", async (req, res) => {
       if (cacheRes && cacheRes.rows && cacheRes.rows.length > 0) {
         const rows = cacheRes.rows as any[];
         
-        // Exact normalized string match check
+        // Exact normalized string match check (only for long specific FAQs)
         const cleanUserQ = queryText.toLowerCase().replace(/[^a-z0-9\u0900-\u097F\u0C80-\u0CFF]/g, '').trim();
-        let matchedRow = rows.find(r => {
+        let matchedRow = cleanUserQ.length > 10 ? rows.find(r => {
           const cleanQ = String(r.question || '').toLowerCase().replace(/[^a-z0-9\u0900-\u097F\u0C80-\u0CFF]/g, '').trim();
           return cleanQ === cleanUserQ;
-        });
-
-        // Fast Semantic Intent Check via LLM if exact match not found
-        if (!matchedRow && rows.length > 0) {
-          try {
-            const candidateList = rows.map(r => ({ id: r.id, question: r.question, intent: r.normalized_intent }));
-            const matchPrompt = `You are a strict semantic question intent matching engine.
-USER QUESTION: "${queryText}"
-TARGET LANGUAGE: "${targetLang}"
-CACHED QUESTIONS:
-${JSON.stringify(candidateList)}
-
-STRICT MATCHING RULES:
-1. "What is FSSAI?" and "Tell me about FSSAI" match (same definition intent).
-2. "What is FSSAI?" and "How does FSSAI work?" DO NOT match (different question intent).
-3. "How to register a complaint?" and "I want to file a complaint" match.
-
-Respond ONLY with valid JSON: {"matchId": "<id>"} if matched, or {"matchId": null} if no match.`;
-
-            const intentCheck = await runLLMGeneration({
-              system: matchPrompt,
-              messages: [{ role: 'user', content: 'Check match' }]
-            });
-
-            if (intentCheck) {
-              const cleanJson = intentCheck.replace(/```json/g, '').replace(/```/g, '').trim();
-              const parsed = JSON.parse(cleanJson);
-              if (parsed && parsed.matchId) {
-                matchedRow = rows.find(r => r.id === parsed.matchId);
-              }
-            }
-          } catch (e) {
-            // Intent check fallback
-          }
-        }
+        }) : null;
 
         if (matchedRow) {
           console.log(`[QA Cache Hit] Pre-generated answer used for: "${queryText}" -> Matched: "${matchedRow.question}"`);
@@ -807,71 +776,67 @@ Respond ONLY with valid JSON: {"matchId": "<id>"} if matched, or {"matchId": nul
 
     const turnCount = Number(req.body.chatCount) || (Array.isArray(history) ? Math.floor(history.length / 2) + 1 : 1);
 
-    const systemPrompt = `You are VoxAssist's expert AI Food Service, Hygiene, and Consumer Grievance Voice Assistant.
-Customer Profile:
-- Name: ${profile?.name || "Guest"}
+    const systemPrompt = `You are VoxAssist's expert AI Food Safety, Hygiene, and Standards Inspection Authority Assistant.
+You represent the Official Government Food Safety & Hygiene Consumer Grievance Portal.
+You are NOT a restaurant, food ordering service, or menu assistant. Do NOT offer menus or food ordering.
+
+Citizen Profile:
+- Name: ${profile?.name || "Citizen"}
 - Phone: ${profile?.phone || "Not provided"}
 - Location: ${profile?.location || "Not specified"}
 
-KNOWLEDGE BASE CONTEXT (Menus, policies, items, pricing, rules recognized from admin documents):
+KNOWLEDGE BASE & REGULATORY DIRECTIVES:
 """
-${effectiveContext || "No custom knowledge documents uploaded yet."}
+${effectiveContext || "Standard FSSAI Food Safety & Standards Guidelines apply."}
 """
 
 TARGET RESPONSE LANGUAGE: ${language || "English"}.
 
-STRICT CONVERSATION & COMPLAINT FLOW RULES:
-1. GENTLE COMPLAINT GATHERING FLOW:
-   - When the customer reports ANY food quality issue, service grievance, or hygiene violation, immediately activate the COMPLAINT GATHERING FLOW (no turn limits).
-   - You MUST politely, warmly, and empathetically ask the customer for the following three key details (ask them naturally and politely, one question at a time if they are not already mentioned):
-     a) WHERE: The specific outlet name, restaurant, branch, or delivery location.
-     b) WHEN: The date and approximate time of the incident.
-     c) CAUSES / DETAILS: Exactly what happened, what went wrong, and any affected dishes/items.
-   - Speak with absolute politeness and high empathy.
-   - When speaking Kannada, ALWAYS use polite and respectful honorifics (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ, ತಿಳಿಸಿಕೊಡಿ, ಕ್ಷಮಿಸಿ).
-   
-2. COMPLAINT CONCLUSION & FAREWELL SIGN-OFF:
-   - Once the user has provided WHERE, WHEN, and CAUSE/DETAILS:
-     a) Generate a comprehensive, highly designed Markdown report using the exact structure below.
-     b) In the spoken portion (1-2 spoken sentences), you MUST say:
-        - In English: "We will take care further. Thank you, ${profile?.name || 'Valued Customer'}! Bye ${profile?.name || ''}, have a nice day!"
-        - In Kannada: "ನಾವು ಮುಂದಿನ ಕ್ರಮವನ್ನು ಕೈಗೊಳ್ಳುತ್ತೇವೆ. ಧನ್ಯವಾದಗಳು, ${profile?.name || 'ಸ್ನೇಹಿತರೇ'}! ಬೈ ${profile?.name || ''}, ತಮ್ಮ ದಿನ ಶುಭವಾಗಿರಲಿ!"
-        - In Hindi: "हम आगे की उचित कार्रवाई करेंगे। धन्यवाद, ${profile?.name || 'प्रिय ग्राहक'}! बाय ${profile?.name || ''}, आपका दिन शुभ हो!"
-     c) Append the token COMPLAINT_DRAFT_REQUEST at the very end of your response.
+STRICT CONVERSATION & RESPONSE RULES:
+1. INFORMATIONAL QUESTIONS:
+   - If the citizen asks a question about food safety regulations, FSSAI licensing, hygiene inspection rules, adulteration testing, food safety laws, or penalties, answer directly, precisely, and accurately with statutory guidance in the requested language (${language || "English"}).
+   - Always use polite, respectful honorifics in Kannada (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ).
 
-HIGHLY DESIGNED MARKDOWN GRIEVANCE REPORT STRUCTURE:
-# 📋 Official Consumer Grievance Report
-> **Reference ID:** #GRV-${Date.now().toString().slice(-6)} | **Priority:** High | **Status:** Pending Review
+2. COMPLAINT & GRIEVANCE REPORTING FLOW:
+   - When the citizen reports a specific food safety violation, unhygienic restaurant/vendor, spoiled/contaminated food, food poisoning incident, or foreign object (insects, hair, glass, chemical odor):
+     a) Express high empathy and serious concern for consumer health.
+     b) Note down the incident details: WHERE (outlet/vendor/location), WHEN (date & time), and CAUSES/VIOLATIONS (symptoms, items, contamination details).
+     c) If key details are missing, ask for them politely one by one.
+     d) Once details are clear, generate the official Food Safety Grievance Report using the Markdown structure below, and append COMPLAINT_DRAFT_REQUEST at the end.
+
+HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
+# 📋 Official Food Safety & Inspection Grievance Report
+> **Reference ID:** #FS-${Date.now().toString().slice(-6)} | **Authority:** Food Safety Inspection Division | **Priority:** Urgent | **Status:** Logged for Enforcement
 
 ---
 
-### 📍 Incident Summary
-| Parameter | Record Details |
+### 📍 Incident & Inspection Summary
+| Parameter | Details |
 | :--- | :--- |
-| **Consumer Name** | ${profile?.name || "Valued Consumer"} |
+| **Complainant Name** | ${profile?.name || "Valued Citizen"} |
 | **Contact Phone** | ${profile?.phone || "Registered Phone"} |
-| **Incident Location (WHERE)** | [Extracted Location/Branch] |
-| **Incident Timing (WHEN)** | [Extracted Date/Time] |
-| **Target Food Item** | [Extracted Food Item] |
-| **Core Cause / Violation** | [Extracted Root Cause] |
-| **Reported Timestamp** | ${new Date().toLocaleString()} |
+| **Establishment / Location (WHERE)** | [Extracted Location/Branch] |
+| **Incident Date & Time (WHEN)** | [Extracted Date/Time] |
+| **Target Food Product** | [Extracted Food Item] |
+| **Violation / Contamination (CAUSE)** | [Extracted Cause/Violation] |
+| **Logged Timestamp** | ${new Date().toLocaleString()} |
 
 ---
 
-### 🔍 Cause & Incident Breakdown
-[Detailed explanation of the cause, timing, symptoms, or service failure]
+### 🔍 Technical Violation Breakdown
+[Detailed explanation of the reported contamination, hygiene failure, or health hazard]
 
-### ⚠️ Hygiene & Safety Compliance Assessment
-- **FSSAI Food Safety Risk:** High concern regarding food handling and storage standards.
-- **Consumer Impact:** Direct quality/health grievance reported.
+### ⚠️ FSSAI Compliance Risk Assessment
+- **Food Safety Hazard Level:** Severe risk to public health and consumer safety.
+- **Enforcement Priority:** Immediate inspection dispatch recommended under Food Safety Act.
 
-### 📌 Required Corrective Actions
-1. Urgent kitchen audit at the specified location.
-2. Immediate consumer redressal & refund/replacement processing.
-3. Managerial follow-up within 24 hours.
+### 📌 Enforcement Directive
+1. Urgent spot-check inspection by Food Safety Officer (FSO).
+2. Sample seizure and food testing laboratory dispatch.
+3. Show-cause notice issued to the establishment management.
 
 ---
-*Report generated by VoxAssist AI Governance Protocol*`;
+*Report issued by Food Safety Governance Protocol*`;
 
     const conversationHistory = Array.isArray(history) && history.length > 0
       ? history.slice(-8).map((h: any) => ({
@@ -893,11 +858,11 @@ HIGHLY DESIGNED MARKDOWN GRIEVANCE REPORT STRUCTURE:
     // Guaranteed natural fallback response if keys fail
     if (!responseText) {
       if (language === 'Kannada') {
-        responseText = "ನಮಸ್ಕಾರ! ನಿಮ್ಮ ಪ್ರಶ್ನೆಯನ್ನು ಸ್ವೀಕರಿಸಲಾಗಿದೆ. ನಮ್ಮ ಆಹಾರ ಪದಾರ್ಥಗಳು ಮತ್ತು ಸೇವೆಗಳ ಬಗ್ಗೆ ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು?";
+        responseText = "ನಮಸ್ಕಾರ! ಇದು ಆಹಾರ ಸುರಕ್ಷತೆ ಮತ್ತು ನೈರ್ಮಲ್ಯ ಪರಿಶೀಲನೆ ಸಹಾಯವಾಣಿ. ಇಂದು ನಿಮ್ಮ ಆಹಾರ ಸುರಕ್ಷತಾ ದೂರಿಗೆ ನಾನು ಹೇಗೆ ಸಹಾಯ ಮಾಡಲಿ?";
       } else if (language === 'Hindi') {
-        responseText = "नमस्ते! आपका संदेश प्राप्त हुआ। मैं हमारे भोजन मेनू और सेवाओं के बारे में आपकी कैसे सहायता कर सकता हूँ?";
+        responseText = "नमस्ते! यह खाद्य सुरक्षा एवं स्वच्छता निरीक्षण हेल्पलाइन है। आज आपकी खाद्य सुरक्षा या शिकायत दर्ज करने में मैं कैसे सहायता कर सकता हूँ?";
       } else {
-        responseText = "Hello! I have received your request. How may I assist you with our food menu and services today?";
+        responseText = "Greetings! This is the Food Safety & Inspection Authority Helpline. How may I assist you with your food safety or hygiene grievance today?";
       }
     }
 
@@ -988,15 +953,15 @@ app.post("/api/ivr/dialogue", async (req, res) => {
     if (digits === "1" || (step === "welcome" && (/1|one|kannada|ಕನ್ನಡ|ಒಂದು/i.test(message || "")))) {
       currentLang = "kn-IN";
       nextStep = "collecting_info";
-      replyText = "ನಮಸ್ಕಾರ, ಕನ್ನಡ ಭಾಷೆಯನ್ನು ಆಯ್ಕೆ ಮಾಡಿಕೊಂಡಿದ್ದಕ್ಕಾಗಿ ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ದಯವಿಟ್ಟು ತಾವು ಎದುರಿಸಿದ ಆಹಾರ ಅಥವಾ ಸೇವೆಯ ಸಮಸ್ಯೆಯ ಬಗ್ಗೆ ಸವಿನಯವಾಗಿ ತಿಳಿಸಿಕೊಡಿ. ನಾವು ಗಮನವಿಟ್ಟು ಆಲಿಸುತ್ತಿದ್ದೇವೆ.";
+      replyText = "ನಮಸ್ಕಾರ! ಆಹಾರ ಸುರಕ್ಷತಾ ಪರಿಶೀಲನೆ ಸಹಾಯವಾಣಿಗೆ ಸ್ವಾಗತ. ದಯವಿಟ್ಟು ತಾವು ಎದುರಿಸಿದ ಆಹಾರ ನೈರ್ಮಲ್ಯ ಅಥವಾ ಕಲುಷಿತ ಆಹಾರದ ದೂರಿನ ಬಗ್ಗೆ ವಿವರವಾಗಿ ತಿಳಿಸಿ. ನಾವು ಸೂಕ್ತ ತನಿಖೆ ನಡೆಸುತ್ತೇವೆ.";
     } else if (digits === "2" || (step === "welcome" && (/2|two|hindi|हिंदी|हिन्दी|दो|ಎರಡು/i.test(message || "")))) {
       currentLang = "hi-IN";
       nextStep = "collecting_info";
-      replyText = "हिंदी चुनने के लिए धन्यवाद। कृपया अपनी भोजन या सेवा संबंधी समस्या का विवरण बताएं। हम आपकी पूरी सहायता करेंगे।";
+      replyText = "नमस्ते! खाद्य सुरक्षा एवं निरीक्षण हेल्पलाइन में आपका स्वागत है। कृपया अपनी खाद्य सुरक्षा या स्वच्छता संबंधी शिकायत का विवरण बताएं। हम उचित जांच करेंगे।";
     } else if (digits === "3" || (step === "welcome" && (/3|three|english|ಇಂಗ್ಲಿಷ್|ಮೂರು|तीन/i.test(message || "")))) {
       currentLang = "en-IN";
       nextStep = "collecting_info";
-      replyText = "Thank you for choosing English. Please describe the food quality or service issue you encountered. We are listening.";
+      replyText = "Welcome to the Food Safety & Standards Inspection Authority Helpline. Please describe the food safety, contamination, or hygiene issue you encountered. We will investigate immediately.";
     } 
     // 2. DTMF Key 7: Press 7 for Audio Voice Note Recording
     else if ((digits === "7" || /7|seven|record|voice note|audio note|ಧ್ವನಿ|ರೆಕಾರ್ಡ್|ಏಳು|ऑडियो|सात/i.test(message || "")) && !isVoiceNote && step !== "ready_for_beep") {

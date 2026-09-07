@@ -321,22 +321,26 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         };
 
         recognition.onresult = (event: any) => {
-          let finalTranscript = '';
-          let interimTranscript = '';
-
+          let fullText = '';
           for (let i = 0; i < event.results.length; ++i) {
             const res = event.results[i];
+            const text = (res[0]?.transcript || '').trim();
             if (res.isFinal) {
-              finalTranscript += res[0].transcript + ' ';
-            } else {
-              interimTranscript += res[0].transcript;
+              if (text) fullText += (fullText ? ' ' : '') + text;
+            } else if (i === event.results.length - 1) {
+              if (text) fullText += (fullText ? ' ' : '') + text;
             }
           }
 
-          const combined = (finalTranscript + interimTranscript).trim();
-          if (combined) {
-            transcriptRef.current = combined;
-            setTranscript(combined);
+          // Deduplicate consecutive repeated words across languages
+          const cleanText = fullText
+            .replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1')
+            .replace(/([\u0900-\u0D7F]+)(?:\s+\1)+/gu, '$1')
+            .trim();
+
+          if (cleanText) {
+            transcriptRef.current = cleanText;
+            setTranscript(cleanText);
             hasSpokenRef.current = true;
             lastSoundTimeRef.current = Date.now();
 

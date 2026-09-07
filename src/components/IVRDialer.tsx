@@ -175,44 +175,44 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     }
   };
 
-  // Reset and start 20s silence timer when IVR finishes speaking
+  // Reset and start silence watch when IVR finishes speaking (45s duration)
   const startSilenceWatch = () => {
     clearSilenceTimers();
     if (!callActive || isRecordingNote) return;
 
     silence20TimerRef.current = setTimeout(() => {
       handleSilenceWarning();
-    }, 20000); // 20 seconds of silence
+    }, 45000); // Generous 45 seconds before polite nudge
   };
 
-  // 20s silence fired: speak warning "We can't hear you", then start 10s final timer
+  // 45s silence fired: speak warning in current language, then start 20s final timer
   const handleSilenceWarning = () => {
     clearSilenceTimers();
 
-    let warningText = "Say again.";
+    let warningText = "We could not hear your voice clearly. Please speak again.";
     if (language === 'kn-IN') {
-      warningText = "ಮತ್ತೆ ಹೇಳಿ.";
+      warningText = "ತಾವು ಹೇಳುವುದು ಸ್ಪಷ್ಟವಾಗಿ ಕೇಳಿಸುತ್ತಿಲ್ಲ, ದಯವಿಟ್ಟು ಮತ್ತೊಮ್ಮೆ ತಿಳಿಸಿ.";
     } else if (language === 'hi-IN') {
-      warningText = "फिर से बोलें।";
+      warningText = "आपकी आवाज़ स्पष्ट नहीं आ रही है, कृपया फिर से बोलें।";
     }
 
     speakIVR(warningText, undefined, language, () => {
-      // Once warning finishes speaking, start 10s countdown
+      // Once warning finishes speaking, start 20s countdown before gentle signoff
       silence10TimerRef.current = setTimeout(() => {
         handleSilenceGoodbye();
-      }, 10000); // 10 seconds after warning
+      }, 20000);
     });
   };
 
-  // 10s silence fired after warning: speak goodbye and end call
+  // Silence final timeout: speak goodbye and end call
   const handleSilenceGoodbye = () => {
     clearSilenceTimers();
 
-    let goodbyeText = "Bye.";
+    let goodbyeText = "Thank you for calling the Food Safety Helpline. Goodbye!";
     if (language === 'kn-IN') {
-      goodbyeText = "ಬೈ.";
+      goodbyeText = "ಧನ್ಯವಾದಗಳು, ಆಹಾರ ಸುರಕ್ಷತಾ ಸಹಾಯವಾಣಿಗೆ ಕರೆ ಮಾಡಿದ್ದಕ್ಕಾಗಿ ವಂದನೆಗಳು. ಬೈ!";
     } else if (language === 'hi-IN') {
-      goodbyeText = "बाय।";
+      goodbyeText = "खाद्य सुरक्षा हेल्पलाइन में संपर्क करने के लिए धन्यवाद। बाय!";
     }
 
     speakIVR(goodbyeText, undefined, language, () => {
@@ -406,6 +406,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     if (!SpeechRecognition) return;
 
     processingSpeechRef.current = false;
+    let localCapturedSpoken = '';
 
     try {
       if (speechRecognitionRef.current) {
@@ -424,30 +425,41 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       };
 
       recognition.onresult = (event: any) => {
+        clearSilenceTimers();
+
         let interimText = '';
         let finalText = '';
 
         for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const resText = event.results[i][0]?.transcript || '';
           if (event.results[i].isFinal) {
-            finalText += event.results[i][0].transcript;
+            finalText += (finalText ? ' ' : '') + resText;
           } else {
-            interimText += event.results[i][0].transcript;
+            interimText = resText;
           }
         }
 
-        const spoken = (finalText || interimText).trim();
-        if (spoken) {
-          setLastCallerSpoken(spoken);
+        const rawSpoken = (finalText || interimText).trim();
+        const cleanSpoken = rawSpoken
+          .replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1')
+          .replace(/([\u0900-\u0D7F]+)(?:\s+\1)+/gu, '$1')
+          .trim();
+
+        if (cleanSpoken) {
+          localCapturedSpoken = cleanSpoken;
+          setLastCallerSpoken(cleanSpoken);
         }
 
         if (finalText && finalText.trim()) {
           clearSilenceTimers();
           processingSpeechRef.current = true;
+          const speechToProcess = cleanSpoken || finalText.trim();
+          localCapturedSpoken = '';
           try {
             recognition.abort();
           } catch {}
           setIsListening(false);
-          handleCallerSpeech(finalText.trim());
+          handleCallerSpeech(speechToProcess);
         }
       };
 
@@ -457,6 +469,17 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
       recognition.onend = () => {
         setIsListening(false);
+
+        // CRITICAL FIX: If user spoke but browser closed recognition stream before marking isFinal=true, process it NOW!
+        if (localCapturedSpoken && localCapturedSpoken.trim() && !processingSpeechRef.current) {
+          processingSpeechRef.current = true;
+          const speechToProcess = localCapturedSpoken.trim();
+          localCapturedSpoken = '';
+          clearSilenceTimers();
+          handleCallerSpeech(speechToProcess);
+          return;
+        }
+
         // Robust Auto-restart if we didn't get any result and we are still in listening mode
         if (callActive && !isIvrSpeaking && !isRecordingNote && !greetingCancelRef.current && !processingSpeechRef.current) {
           setTimeout(() => {
@@ -482,9 +505,9 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     clearSilenceTimers();
 
     const options = [
-      { text: "ನಮಸ್ಕಾರ, ವೋಕ್ಸ್-ಅಸಿಸ್ಟ್ ಗ್ರಾಹಕ ಸಹಾಯವಾಣಿಗೆ ತಮಗೆ ಆದರದ ಸ್ವಾಗತ. ಕನ್ನಡಕ್ಕಾಗಿ 1 ಒತ್ತಿ.", lang: "kn-IN" },
-      { text: "हिंदी के लिए 2 दबाएँ।", lang: "hi-IN" },
-      { text: "For English, press 3.", lang: "en-IN" }
+      { text: "ನಮಸ್ಕಾರ, ಆಹಾರ ಸುರಕ್ಷತಾ ಮತ್ತು ನೈರ್ಮಲ್ಯ ಪರಿಶೀಲನೆ ಸಹಾಯವಾಣಿಗೆ ತಮಗೆ ಆದರದ ಸ್ವಾಗತ. ಕನ್ನಡಕ್ಕಾಗಿ 1 ಒತ್ತಿ.", lang: "kn-IN" },
+      { text: "खाद्य सुरक्षा एवं निरीक्षण हेल्पलाइन में आपका स्वागत है। हिंदी के लिए 2 दबाएँ।", lang: "hi-IN" },
+      { text: "Welcome to the Food Safety & Standards Inspection Authority Helpline. For English, press 3.", lang: "en-IN" }
     ];
 
     for (let i = 0; i < options.length; i++) {
@@ -580,6 +603,9 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     audioNoteUrl?: string; 
     isVoiceNote?: boolean; 
   }) => {
+    clearSilenceTimers();
+    setStatusMessage('AI is analyzing complaint...');
+
     try {
       const response = await fetch('/api/ivr/dialogue', {
         method: 'POST',
@@ -597,6 +623,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       });
 
       const data = await response.json();
+      setStatusMessage('Connected');
       if (!data) return;
 
       if (data.language && data.language !== language) {
@@ -626,6 +653,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       }
     } catch (err) {
       console.error("IVR interaction failed:", err);
+      setStatusMessage('Connected');
     }
   };
 
