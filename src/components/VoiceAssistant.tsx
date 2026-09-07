@@ -58,6 +58,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(typeof window !== 'undefined' ? window.speechSynthesis : null);
   const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
+  const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const transcriptRef = useRef<string>('');
@@ -96,6 +97,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         synthRef.current.cancel();
       } catch {}
     }
+    activeUtteranceRef.current = null;
     setPlayingMsgId(null);
     updateSpeakingState(false);
   };
@@ -434,9 +436,9 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         });
       }
 
-      // If user selected Kannada, but this browser has zero Kannada TTS voices installed:
+      // If user selected Kannada or Hindi, but this browser has zero matching TTS voices installed:
       // Return false so we can smoothly fall back to server/audioUrl TTS without silence or error!
-      if (lang === 'Kannada' && !matchedVoice) {
+      if ((lang === 'Kannada' || lang === 'Hindi') && !matchedVoice) {
         return false;
       }
 
@@ -444,13 +446,17 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         utterance.voice = matchedVoice;
       }
 
+      activeUtteranceRef.current = utterance;
+
       utterance.onstart = () => updateSpeakingState(true);
       utterance.onend = () => {
+        activeUtteranceRef.current = null;
         updateSpeakingState(false);
         setPlayingMsgId(null);
       };
       utterance.onerror = (e) => {
         console.warn("Browser speech synthesis error:", e);
+        activeUtteranceRef.current = null;
         updateSpeakingState(false);
         setPlayingMsgId(null);
       };
@@ -593,19 +599,21 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     transcriptRef.current = '';
     updateListeningState(true);
     
-    // If Web Speech API is supported, use it EXCLUSIVELY to prevent microphone hardware conflicts
-    // especially on Android Chrome where MediaRecorder locks the mic from Google Keyboard Speech.
+    // 1. Start audio recording buffer for high-accuracy Sarvam Saaras backend STT
+    try {
+      await startRecording();
+    } catch (recErr) {
+      console.warn("Audio recorder initialization notice:", recErr);
+    }
+
+    // 2. Also start native browser speech recognition for real-time live preview & instant transcription
     if (recognitionRef.current) {
       try {
         recognitionRef.current.start();
-        return; // Skip MediaRecorder entirely!
       } catch (e) {
-        console.warn("Native recognition start notice (falling back cleanly to audio recorder):", e);
+        console.warn("Native recognition start notice (audio recorder active):", e);
       }
     }
-    
-    // Fallback if Web Speech API is missing or failed to start
-    await startRecording();
   };
 
   const toggleListening = async () => {

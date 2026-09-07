@@ -43,6 +43,8 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const [isIvrSpeaking, setIsIvrSpeaking] = useState<boolean>(false);
   const [isListening, setIsListening] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('Press Start Call to begin');
+  const [lastCallerSpoken, setLastCallerSpoken] = useState<string>('');
+  const [lastIvrResponse, setLastIvrResponse] = useState<string>('');
 
   // Voice Note Recording (Press 7 Feature)
   const [isBeepPlaying, setIsBeepPlaying] = useState<boolean>(false);
@@ -72,6 +74,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const silence10TimerRef = useRef<any>(null);
   const greetingCancelRef = useRef<boolean>(false);
   const processingSpeechRef = useRef<boolean>(false);
+  const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   // Web Audio Context initialization
   const getAudioContext = () => {
@@ -224,8 +227,11 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       audioPlayerRef.current.currentTime = 0;
     }
     if (window.speechSynthesis) {
-      window.speechSynthesis.cancel();
+      try {
+        window.speechSynthesis.cancel();
+      } catch {}
     }
+    activeUtteranceRef.current = null;
     setIsIvrSpeaking(false);
   };
 
@@ -235,7 +241,65 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     stopSpeechOnly();
   };
 
-  // Play speech using Sarvam TTS with fallback (always emoji-free)
+  // Google Browser Web Speech API TTS (First Priority)
+  const speakWithBrowserGoogle = (text: string, langCode: string, onEnd: () => void): boolean => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return false;
+    try {
+      window.speechSynthesis.cancel();
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
+
+      const prefix = langCode.slice(0, 2).toLowerCase();
+      const voices = window.speechSynthesis.getVoices();
+
+      // Find best available voice on the device (prioritizing Google keyboard / Android / native voice)
+      let voiceMatch = voices.find(v => {
+        const vLang = v.lang.toLowerCase().replace('_', '-');
+        const vName = v.name.toLowerCase();
+        return (vLang.startsWith(prefix) || vName.includes(prefix)) && 
+               (vName.includes('google') || vName.includes('natural'));
+      });
+
+      if (!voiceMatch) {
+        voiceMatch = voices.find(v => {
+          const vLang = v.lang.toLowerCase().replace('_', '-');
+          return vLang.startsWith(prefix);
+        });
+      }
+
+      // If user selected Kannada or Hindi, but this browser has zero matching TTS voices installed:
+      // Return false so we can smoothly fall back to server audio without silence or error!
+      if ((prefix === 'kn' || prefix === 'hi') && !voiceMatch) {
+        return false;
+      }
+
+      const utterance = new SpeechSynthesisUtterance(stripEmojis(text));
+      utterance.lang = langCode;
+      utterance.rate = 0.95;
+      utterance.pitch = 1.0;
+      if (voiceMatch) utterance.voice = voiceMatch;
+
+      activeUtteranceRef.current = utterance;
+      utterance.onend = () => {
+        activeUtteranceRef.current = null;
+        onEnd();
+      };
+      utterance.onerror = (e) => {
+        console.warn("SpeechSynthesis notice:", e);
+        activeUtteranceRef.current = null;
+        onEnd();
+      };
+
+      window.speechSynthesis.speak(utterance);
+      return true;
+    } catch (e) {
+      console.warn("Browser SpeechSynthesis attempt notice:", e);
+      return false;
+    }
+  };
+
+  // Play speech: 1st Priority Google Browser Web Speech, with server fallbacks
   const speakIVR = async (
     text: string, 
     audioUrl?: string, 
@@ -252,6 +316,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
     setIsIvrSpeaking(true);
     setStatusMessage(text);
+    setLastIvrResponse(text);
 
     const handleSpeechEnd = () => {
       setIsIvrSpeaking(false);
@@ -263,7 +328,13 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       }
     };
 
-    // Priority 1: Audio URL from Sarvam
+    // 1ST PRIORITY: Google Browser Web Speech API
+    const spokeWithBrowser = speakWithBrowserGoogle(cleanPrompt, targetLang, handleSpeechEnd);
+    if (spokeWithBrowser) {
+      return;
+    }
+
+    // 2ND PRIORITY: Pre-generated / server audioUrl fallback (when device lacks native Kannada/Hindi voices)
     if (audioUrl) {
       try {
         if (!audioPlayerRef.current) {
@@ -277,48 +348,57 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
         await audioPlayerRef.current.play();
         return;
       } catch (err) {
-        console.warn("Sarvam audio playback failed:", err);
+        console.warn("Audio URL playback notice:", err);
       }
     }
 
-    // Priority 2: In-browser speech synthesis
+    // 3RD PRIORITY: In-browser speech synthesis or high-fidelity /api/tts
     fallbackSpeech(cleanPrompt, targetLang, handleSpeechEnd);
   };
 
-  const fallbackSpeech = (text: string, targetLang: string, onEnd: () => void) => {
-    if (!('speechSynthesis' in window)) {
-      onEnd();
-      return;
-    }
-
-    window.speechSynthesis.cancel();
+  const fallbackSpeech = async (text: string, targetLang: string, onEnd: () => void) => {
     const cleanText = stripEmojis(text);
     if (!cleanText) {
       onEnd();
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.lang = targetLang;
-    utterance.rate = 0.95;
-    utterance.pitch = 1.05;
-
-    const voices = window.speechSynthesis.getVoices();
     const prefix = targetLang.slice(0, 2).toLowerCase();
-    const voiceMatch = voices.find(v => 
-      v.lang.toLowerCase().replace('_', '-').startsWith(prefix) && 
-      (v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('zira') || v.name.toLowerCase().includes('google') || v.name.toLowerCase().includes('natural'))
-    ) || voices.find(v => v.lang.toLowerCase().replace('_', '-').startsWith(prefix));
 
-    if (voiceMatch) utterance.voice = voiceMatch;
+    // High-fidelity Sarvam AI audio fallback
+    try {
+      let langName = "English";
+      if (prefix === "kn") langName = "Kannada";
+      else if (prefix === "hi") langName = "Hindi";
 
-    utterance.onend = onEnd;
-    utterance.onerror = onEnd;
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: cleanText, language: langName })
+      });
 
-    window.speechSynthesis.speak(utterance);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.audioBase64) {
+          if (!audioPlayerRef.current) {
+            audioPlayerRef.current = new Audio();
+          }
+          audioPlayerRef.current.src = `data:audio/wav;base64,${data.audioBase64}`;
+          audioPlayerRef.current.onended = () => onEnd();
+          audioPlayerRef.current.onerror = () => onEnd();
+          await audioPlayerRef.current.play();
+          return;
+        }
+      }
+    } catch (apiErr) {
+      console.warn("Fallback /api/tts request notice:", apiErr);
+    }
+
+    // Final safety fallback
+    onEnd();
   };
 
-  // Start continuous listening for caller voice
+  // Start continuous listening for caller voice (Google Browser Web Speech API 1st Priority)
   const startUserListening = () => {
     if (!callActive || isRecordingNote) return;
 
@@ -335,9 +415,8 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       }
 
       const recognition = new SpeechRecognition();
-      // Keep continuous as false to naturally detect sentence pauses, but auto-restart on onend
       recognition.continuous = false;
-      recognition.interimResults = false;
+      recognition.interimResults = true;
       recognition.lang = language;
 
       recognition.onstart = () => {
@@ -345,15 +424,30 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       };
 
       recognition.onresult = (event: any) => {
-        const spoken = event.results[0][0]?.transcript?.trim();
+        let interimText = '';
+        let finalText = '';
+
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          if (event.results[i].isFinal) {
+            finalText += event.results[i][0].transcript;
+          } else {
+            interimText += event.results[i][0].transcript;
+          }
+        }
+
+        const spoken = (finalText || interimText).trim();
         if (spoken) {
+          setLastCallerSpoken(spoken);
+        }
+
+        if (finalText && finalText.trim()) {
           clearSilenceTimers();
           processingSpeechRef.current = true;
           try {
             recognition.abort();
           } catch {}
           setIsListening(false);
-          handleCallerSpeech(spoken);
+          handleCallerSpeech(finalText.trim());
         }
       };
 
@@ -498,7 +592,17 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   };
 
   // Central IVR State Transition Caller
-  const sendIVRInput = async ({ digits, message }: { digits?: string; message?: string }) => {
+  const sendIVRInput = async ({ 
+    digits, 
+    message, 
+    audioNoteUrl: inputAudioUrl, 
+    isVoiceNote 
+  }: { 
+    digits?: string; 
+    message?: string; 
+    audioNoteUrl?: string; 
+    isVoiceNote?: boolean; 
+  }) => {
     try {
       const response = await fetch('/api/ivr/dialogue', {
         method: 'POST',
@@ -509,7 +613,9 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
           step: ivrStep,
           language,
           profile,
-          collectedData
+          collectedData,
+          audioNoteUrl: inputAudioUrl,
+          isVoiceNote
         })
       });
 
@@ -589,30 +695,68 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     setIsRecordingNote(false);
   };
 
-  // Upload Voice Note to Cloudinary as MP3 and attach to complaint
+  // Transcribe recorded voice with STT, upload audio file, and react properly in IVR
   const uploadVoiceNote = async (audioBlob: Blob) => {
     try {
-      const formData = new FormData();
-      formData.append('audio', audioBlob, 'voice_note.webm');
+      setStatusMessage('Processing your recorded voice note...');
 
-      const res = await fetch('/api/upload-audio', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await res.json();
+      // 1. Transcribe the recorded voice with STT so IVR understands what was spoken
+      let transcript = '';
+      try {
+        const sttForm = new FormData();
+        sttForm.append('audio', audioBlob, 'recording.webm');
+        const langName = language === 'kn-IN' ? 'Kannada' : (language === 'hi-IN' ? 'Hindi' : 'English');
+        sttForm.append('language', langName);
 
-      if (data.url) {
-        setAudioNoteUrl(data.url);
-        const updated = { ...collectedData, audioNoteUrl: data.url };
-        setCollectedData(updated);
-
-        sendIVRInput({
-          message: "Voice note recorded and attached.",
-          digits: undefined
-        });
+        const sttRes = await fetch('/api/stt', { method: 'POST', body: sttForm });
+        if (sttRes.ok) {
+          const sttData = await sttRes.json();
+          transcript = sttData.transcript?.trim() || '';
+        }
+      } catch (sttErr) {
+        console.warn("STT on recorded voice note notice:", sttErr);
       }
+
+      // 2. Upload to Cloudinary for permanent MP3 audio evidence link
+      let uploadedUrl = '';
+      try {
+        const uploadForm = new FormData();
+        uploadForm.append('audio', audioBlob, 'voice_note.webm');
+        const uploadRes = await fetch('/api/upload-audio', { method: 'POST', body: uploadForm });
+        if (uploadRes.ok) {
+          const uploadData = await uploadRes.json();
+          uploadedUrl = uploadData.url || '';
+        }
+      } catch (upErr) {
+        console.warn("Upload audio notice:", upErr);
+      }
+
+      if (transcript) {
+        setLastCallerSpoken(transcript);
+      }
+      if (uploadedUrl) {
+        setAudioNoteUrl(uploadedUrl);
+      }
+
+      const updated = { 
+        ...collectedData, 
+        audioNoteUrl: uploadedUrl || collectedData.audioNoteUrl,
+        cause: transcript || collectedData.cause
+      };
+      setCollectedData(updated);
+
+      // React properly to what the caller said in their voice note!
+      sendIVRInput({
+        message: transcript || "Voice note recorded and attached.",
+        audioNoteUrl: uploadedUrl,
+        isVoiceNote: true
+      });
     } catch (err) {
-      console.error("Voice note upload failed:", err);
+      console.error("Voice note handling error:", err);
+      sendIVRInput({
+        message: "Voice note recorded.",
+        isVoiceNote: true
+      });
     }
   };
 
@@ -662,7 +806,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       </div>
 
       {/* Transparent Glass Status Pill */}
-      <div className="w-full max-w-xs my-2 text-center">
+      <div className="w-full max-w-xs my-1 text-center">
         <div className="bg-white/15 backdrop-blur-2xl border border-white/25 rounded-2xl px-4 py-2.5 shadow-lg text-white">
           {isBeepPlaying ? (
             <div className="text-amber-300 font-bold text-xs flex items-center justify-center gap-1.5">
@@ -690,6 +834,24 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
           )}
         </div>
       </div>
+
+      {/* Live Conversation Transcript Card: Displays caller speech and IVR reaction */}
+      {callActive && (lastIvrResponse || lastCallerSpoken) && (
+        <div className="w-full max-w-xs my-1.5 bg-black/30 backdrop-blur-xl border border-white/20 rounded-2xl p-3 shadow-lg text-left space-y-1.5 transition-all text-xs">
+          {lastIvrResponse && (
+            <div className="text-white/95 flex items-start gap-1.5">
+              <span className="shrink-0 text-amber-300 font-black">🤖 IVR:</span>
+              <span className="line-clamp-2 leading-relaxed">{lastIvrResponse}</span>
+            </div>
+          )}
+          {lastCallerSpoken && (
+            <div className="text-emerald-300 flex items-start gap-1.5 font-medium">
+              <span className="shrink-0 text-emerald-400 font-black">🎙️ You:</span>
+              <span className="line-clamp-2 leading-relaxed">"{lastCallerSpoken}"</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Dialpad: Independent, NO background, NO border on container, Glassmorphism Transparent Buttons */}
       <div className="w-full max-w-xs my-3">

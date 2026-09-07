@@ -26,23 +26,36 @@ try {
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// Helper to convert WebM buffer to WAV buffer for strict APIs (like Sarvam)
+// Helper to convert WebM/audio buffer to WAV buffer for strict APIs (like Sarvam)
 async function convertWebmToWav(buffer: Buffer): Promise<Buffer> {
+  const os = await import("os");
+  const fs = await import("fs");
+  const path = await import("path");
+  const tmpIn = path.join(os.tmpdir(), `in_${Date.now()}_${Math.random().toString(36).slice(2)}.webm`);
+  const tmpOut = path.join(os.tmpdir(), `out_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
+
+  await fs.promises.writeFile(tmpIn, buffer);
   return new Promise((resolve, reject) => {
-    const inputStream = new PassThrough();
-    inputStream.end(buffer);
-    
-    const outputStream = new PassThrough();
-    const chunks: Buffer[] = [];
-    
-    outputStream.on("data", (chunk: Buffer) => chunks.push(chunk));
-    outputStream.on("end", () => resolve(Buffer.concat(chunks)));
-    outputStream.on("error", reject);
-    
-    ffmpeg(inputStream)
+    ffmpeg(tmpIn)
       .toFormat("wav")
-      .on("error", reject)
-      .pipe(outputStream);
+      .audioChannels(1)
+      .audioFrequency(16000)
+      .on("end", async () => {
+        try {
+          const wavBuf = await fs.promises.readFile(tmpOut);
+          await fs.promises.unlink(tmpIn).catch(() => {});
+          await fs.promises.unlink(tmpOut).catch(() => {});
+          resolve(wavBuf);
+        } catch (e) {
+          reject(e);
+        }
+      })
+      .on("error", async (err) => {
+        await fs.promises.unlink(tmpIn).catch(() => {});
+        await fs.promises.unlink(tmpOut).catch(() => {});
+        reject(err);
+      })
+      .save(tmpOut);
   });
 }
 
@@ -83,87 +96,11 @@ async function runLLMGeneration({
     }
   }
 
-  // 1. Primary Option: Google Gemini 2.5 Flash (1st Priority for Multimodal AI)
-  const geminiKeys = [
-    process.env.GEMINI_API_KEY,
-    process.env.GOOGLE_GENAI_API_KEY,
-    "AQ.Ab8RN6JVU7-hudYEChpcOffZLuDhTY-KbutW2lMCKvtrtOuR0Q"
-  ].filter(Boolean) as string[];
-
-  for (const gKey of geminiKeys) {
-    if (!gKey || gKey === "YOUR_GEMINI_API_KEY") continue;
-    try {
-      const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${gKey}`;
-      const geminiRes = await fetchWithTimeout(restUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: formattedMessages.map((m: any) => ({
-            role: m.role === "assistant" ? "model" : (m.role === "system" ? "user" : m.role),
-            parts: [{ text: String(m.content || "") }]
-          }))
-        })
-      }, 10000);
-
-      if (geminiRes.ok) {
-        const data: any = await geminiRes.json();
-        const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (reply && reply.trim()) {
-          return reply.trim();
-        }
-      }
-    } catch (gErr) {
-      // Try next
-    }
-  }
-
-  // 2. Backup Option: Active Groq Fast LLMs
-  const groqKeys = [
-    process.env.GROQ_API_KEY,
-    "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"
-  ].filter(Boolean) as string[];
-
-  const activeGroqModels = [
-    "openai/gpt-oss-120b",
-    "llama-3.3-70b-versatile",
-    "llama3-70b-8192"
-  ];
-
-  for (const gKey of groqKeys) {
-    if (!gKey || gKey === "YOUR_GROQ_API_KEY") continue;
-    for (const gModel of activeGroqModels) {
-      try {
-        const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${gKey}`,
-          },
-          body: JSON.stringify({
-            model: gModel,
-            messages: formattedMessages,
-            temperature: 0.5,
-            max_tokens: 600,
-          }),
-        }, 8000);
-
-        if (groqRes.ok) {
-          const data: any = await groqRes.json();
-          const reply = data?.choices?.[0]?.message?.content;
-          if (reply && reply.trim()) {
-            return reply.trim();
-          }
-        }
-      } catch (err: any) {
-        // Try next
-      }
-    }
-  }
-
-  // 2. Second Priority: Vercel AI Gateway (openai/gpt-4o-mini / gpt-4o)
+  // 1. Primary Option: High-Speed Vercel AI Gateway (openai/gpt-4o-mini / gpt-4o)
   const vercelKeys = [
-    process.env.OPENAI_API_KEY,
-    "vck_3GaBkIjy2p0dPWns5uvuO7an1KdbnY1bAeIT6WHAXoYSXORqJF1rhJMo"
+    "vck_3GaBkIjy2p0dPWns5uvuO7an1KdbnY1bAeIT6WHAXoYSXORqJF1rhJMo",
+    process.env.VERCEL_API_KEY,
+    process.env.OPENAI_API_KEY
   ].filter(Boolean) as string[];
 
   const vercelModels = [
@@ -186,7 +123,7 @@ async function runLLMGeneration({
             messages: formattedMessages,
             max_tokens: 600,
           }),
-        }, 10000);
+        }, 5000);
 
         if (gatewayRes.ok) {
           const data: any = await gatewayRes.json();
@@ -198,6 +135,34 @@ async function runLLMGeneration({
       } catch (e: any) {
         // Try next
       }
+    }
+  }
+
+  // 2. Secondary Option: Google Gemini Flash
+  const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY;
+  if (geminiKey && !geminiKey.startsWith("AQ.Ab8") && geminiKey !== "YOUR_GEMINI_API_KEY") {
+    try {
+      const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${geminiKey}`;
+      const geminiRes = await fetchWithTimeout(restUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: formattedMessages.map((m: any) => ({
+            role: m.role === "assistant" ? "model" : (m.role === "system" ? "user" : m.role),
+            parts: [{ text: String(m.content || "") }]
+          }))
+        })
+      }, 5000);
+
+      if (geminiRes.ok) {
+        const data: any = await geminiRes.json();
+        const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (reply && reply.trim()) {
+          return reply.trim();
+        }
+      }
+    } catch (gErr) {
+      // Try next
     }
   }
 
@@ -949,12 +914,13 @@ HIGHLY DESIGNED MARKDOWN GRIEVANCE REPORT STRUCTURE:
         markdownPart = parts.slice(1).join("").trim();
       } else {
         markdownPart = cleanedText;
+        const customerName = profile?.name ? ` ${profile.name}` : "";
         if (language === 'Kannada') {
-          spokenPart = "ನಿಮ್ಮ ದೂರನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗಿದೆ. ದಯವಿಟ್ಟು ಕೆಳಗಿನ ಅಧಿಕೃತ ವರದಿಯನ್ನು ಪರಿಶೀಲಿಸಿ ದೃಢೀಕರಿಸಿ.";
+          spokenPart = `ನಾವು ಮುಂದಿನ ಕ್ರಮವನ್ನು ಕೈಗೊಳ್ಳುತ್ತೇವೆ. ಧನ್ಯವಾದಗಳು${customerName}! ಬೈ${customerName}, ತಮ್ಮ ದಿನ ಶುಭವಾಗಿರಲಿ!`;
         } else if (language === 'Hindi') {
-          spokenPart = "आपकी औपचारिक शिकायत तैयार कर ली गई है। कृपया नीचे दी गई रिपोर्ट की जाँच करें और पुष्टि करें।";
+          spokenPart = `हम आगे की उचित कार्रवाई करेंगे। धन्यवाद${customerName}! बाय${customerName}, आपका दिन शुभ हो!`;
         } else {
-          spokenPart = "Your official grievance report has been drafted. Please review the details below and confirm.";
+          spokenPart = `We will take care further. Thank you${customerName}! Bye${customerName}, have a nice day!`;
         }
       }
     }
@@ -999,13 +965,18 @@ app.post("/api/ivr/dialogue", async (req, res) => {
     language = "en-IN", 
     profile, 
     collectedData = {}, 
-    history = [] 
+    history = [],
+    audioNoteUrl,
+    isVoiceNote
   } = req.body;
 
   let currentLang = language;
   let nextStep = step;
   let replyText = "";
   let updatedData = { ...collectedData };
+  if (audioNoteUrl) {
+    updatedData.audioNoteUrl = audioNoteUrl;
+  }
   let isComplaintReady = false;
   let markdownReport = "";
 
@@ -1014,21 +985,21 @@ app.post("/api/ivr/dialogue", async (req, res) => {
 
   try {
     // 1. DTMF Language Selection (1 = Kannada, 2 = Hindi, 3 = English)
-    if (digits === "1" || (step === "welcome" && /kannada|ಕನ್ನಡ/i.test(message || ""))) {
+    if (digits === "1" || (step === "welcome" && (/1|one|kannada|ಕನ್ನಡ|ಒಂದು/i.test(message || "")))) {
       currentLang = "kn-IN";
       nextStep = "collecting_info";
       replyText = "ನಮಸ್ಕಾರ, ಕನ್ನಡ ಭಾಷೆಯನ್ನು ಆಯ್ಕೆ ಮಾಡಿಕೊಂಡಿದ್ದಕ್ಕಾಗಿ ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ದಯವಿಟ್ಟು ತಾವು ಎದುರಿಸಿದ ಆಹಾರ ಅಥವಾ ಸೇವೆಯ ಸಮಸ್ಯೆಯ ಬಗ್ಗೆ ಸವಿನಯವಾಗಿ ತಿಳಿಸಿಕೊಡಿ. ನಾವು ಗಮನವಿಟ್ಟು ಆಲಿಸುತ್ತಿದ್ದೇವೆ.";
-    } else if (digits === "2" || (step === "welcome" && /hindi|हिंदी/i.test(message || ""))) {
+    } else if (digits === "2" || (step === "welcome" && (/2|two|hindi|हिंदी|हिन्दी|दो|ಎರಡು/i.test(message || "")))) {
       currentLang = "hi-IN";
       nextStep = "collecting_info";
       replyText = "हिंदी चुनने के लिए धन्यवाद। कृपया अपनी भोजन या सेवा संबंधी समस्या का विवरण बताएं। हम आपकी पूरी सहायता करेंगे।";
-    } else if (digits === "3" || (step === "welcome" && /english/i.test(message || ""))) {
+    } else if (digits === "3" || (step === "welcome" && (/3|three|english|ಇಂಗ್ಲಿಷ್|ಮೂರು|तीन/i.test(message || "")))) {
       currentLang = "en-IN";
       nextStep = "collecting_info";
       replyText = "Thank you for choosing English. Please describe the food quality or service issue you encountered. We are listening.";
     } 
     // 2. DTMF Key 7: Press 7 for Audio Voice Note Recording
-    else if (digits === "7" || /press 7|record audio|voice note/i.test(message || "")) {
+    else if ((digits === "7" || /7|seven|record|voice note|audio note|ಧ್ವನಿ|ರೆಕಾರ್ಡ್|ಏಳು|ऑडियो|सात/i.test(message || "")) && !isVoiceNote && step !== "ready_for_beep") {
       nextStep = "ready_for_beep";
       if (isKannada) {
         replyText = "ದಯವಿಟ್ಟು ಬೀಪ್ ಶಬ್ದದ ನಂತರ ತಮ್ಮ ವಿವರವಾದ ಧ್ವನಿ ಸಂದೇಶವನ್ನು ಸ್ಪಷ್ಟವಾಗಿ ಮಾತನಾಡಿ.";
@@ -1038,8 +1009,57 @@ app.post("/api/ivr/dialogue", async (req, res) => {
         replyText = "Please record your message after the beep.";
       }
     }
+    // 2b. Reaction to Recorded Voice Note
+    else if (isVoiceNote || step === "ready_for_beep") {
+      nextStep = "press_7_prompt";
+      if (message && message !== "Voice note recorded and attached." && message !== "Voice note recorded.") {
+        const prompt = `The customer just recorded a voice note describing their food complaint.
+Voice note transcript: "${message}"
+Language: ${currentLang}
+Known details:
+- Cause: ${updatedData.cause || "Unknown"}
+- Location: ${updatedData.location || "Unknown"}
+- When: ${updatedData.when || "Unknown"}
+- Item: ${updatedData.item || "Unknown"}
+
+Instructions:
+1. Extract any newly mentioned cause (what went wrong/details), location/where (restaurant name, branch, address), when (date or time), or food item name.
+2. Acknowledge what the caller spoke in their voice note in 1-2 calm, reassuring sentences.
+3. Then state clearly: "To submit your complaint now, press 9 or say confirm." (in ${currentLang}).
+4. Use polite Kannada/Hindi honorifics.
+
+Respond in strict JSON:
+{
+  "cause": "updated or existing cause",
+  "location": "updated or existing location",
+  "when": "updated or existing when",
+  "item": "updated or existing item",
+  "spokenResponse": "1-2 highly polite sentences to speak to caller in ${currentLang}"
+}`;
+
+        try {
+          const aiResponse = await runLLMGeneration({ prompt }) || "{}";
+          const parsed = JSON.parse(aiResponse);
+          if (parsed.cause) updatedData.cause = parsed.cause;
+          if (parsed.location) updatedData.location = parsed.location;
+          if (parsed.when) updatedData.when = parsed.when;
+          if (parsed.item) updatedData.item = parsed.item;
+          if (parsed.spokenResponse) replyText = parsed.spokenResponse;
+        } catch {}
+      }
+
+      if (!replyText) {
+        if (isKannada) {
+          replyText = "ಧನ್ಯವಾದಗಳು, ತಮ್ಮ ಧ್ವನಿ ಸಂದೇಶವನ್ನು ಸ್ವೀಕರಿಸಲಾಗಿದೆ ಮತ್ತು ದಾಖಲಿಸಲಾಗಿದೆ. ದೂರನ್ನು ಸಲ್ಲಿಸಲು 9 ಒತ್ತಿ ಅಥವಾ ದೃಢೀಕರಿಸಿ ಎಂದು ಹೇಳಿ.";
+        } else if (isHindi) {
+          replyText = "धन्यवाद, आपकी ऑडियो रिकॉर्डिंग सुरक्षित कर ली गई है। शिकायत दर्ज करने के लिए 9 दबाएँ या पुष्टि करें कहें।";
+        } else {
+          replyText = "Thank you, your voice note has been recorded and attached. To submit your complaint, press 9 or say confirm.";
+        }
+      }
+    }
     // 3. DTMF Key 9 or explicit user confirmation to submit
-    else if (digits === "9" || (step === "press_7_prompt" && /confirm|yes|submit|sari|ha/i.test(message || ""))) {
+    else if (digits === "9" || (step === "press_7_prompt" && /9|nine|confirm|yes|submit|sari|ha|ದೃಢೀಕರಿಸಿ|ಒಂಬತ್ತು|दर्ज|पुष्टि|हाँ|नौ/i.test(message || ""))) {
       nextStep = "submitted";
       isComplaintReady = true;
 
@@ -1313,79 +1333,28 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
 
     const isKannada = language === "Kannada" || language === "kn-IN" || targetLang === "kn-IN";
 
-    // 1. First Priority: Gemini 2.5 Flash Multimodal Audio Transcription (English, Hindi, Kannada)
-    const geminiKey = process.env.GEMINI_API_KEY || "AQ.Ab8RN6JVU7-hudYEChpcOffZLuDhTY-KbutW2lMCKvtrtOuR0Q";
-    if (geminiKey) {
-      try {
-        const audioBase64 = req.file.buffer.toString("base64");
-        const mimeType = req.file.mimetype || "audio/webm";
-        let langInstruction = "Transcribe this audio accurately. Return ONLY the transcribed spoken text without commentary.";
-        if (isKannada) {
-          langInstruction = "Transcribe this Kannada audio accurately in Kannada script. Return ONLY the transcribed text.";
-        } else if (language === "Hindi" || language === "hi-IN") {
-          langInstruction = "Transcribe this Hindi audio accurately in Devanagari script. Return ONLY the transcribed text.";
-        }
-
-        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
-        const restRes = await fetchWithTimeout(restUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { inline_data: { mime_type: mimeType, data: audioBase64 } },
-                { text: langInstruction }
-              ]
-            }]
-          })
-        }, 12000);
-
-        if (restRes.ok) {
-          const restData: any = await restRes.json();
-          const text = restData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-          if (text && !isHallucinatedTranscript(text)) {
-            console.log(`[STT Success] Gemini Flash 2.5 transcribed (${language || 'English'}): "${text}"`);
-            return res.json({ transcript: text, provider: "gemini-flash" });
-          }
-        }
-      } catch (geminiErr: any) {
-        console.warn("Gemini 2.5 Flash STT notice:", geminiErr?.message);
-      }
-    }
-
-    // 2. Second Priority: Sarvam AI Saaras STT (Tuned Indic STT)
+    // 1. First Priority: Sarvam AI Saaras STT (Specialized Indic STT for Kannada, Hindi & Indian English)
     if (sarvamKey && sarvamKey !== "YOUR_SARVAM_API_KEY") {
       try {
         const formData = new FormData();
         const rawAudioBuffer = req.file.buffer;
+        const originalMime = req.file.mimetype || "audio/webm";
         
         let wavBuffer: Buffer;
-        let useRaw = false;
-        try {
-          wavBuffer = await convertWebmToWav(rawAudioBuffer);
-        } catch (convErr) {
-          console.warn("FFmpeg conversion skipped/failed, trying raw buffer directly:", convErr);
+        // Check if buffer is already a valid WAV file (starts with 'RIFF')
+        if (rawAudioBuffer.length > 12 && rawAudioBuffer.toString("ascii", 0, 4) === "RIFF") {
           wavBuffer = rawAudioBuffer;
-          useRaw = true;
+        } else {
+          try {
+            wavBuffer = await convertWebmToWav(rawAudioBuffer);
+          } catch (convErr) {
+            console.warn("Audio conversion notice, attempting raw buffer:", convErr);
+            wavBuffer = rawAudioBuffer;
+          }
         }
 
-        const originalMime = req.file.mimetype || "audio/webm";
-        let ext = "wav";
-        let mime = "audio/wav";
-        
-        if (useRaw) {
-          mime = originalMime;
-          if (originalMime.includes("mp4") || originalMime.includes("m4a")) ext = "mp4";
-          else if (originalMime.includes("ogg")) ext = "ogg";
-          else if (originalMime.includes("mpeg") || originalMime.includes("mp3")) ext = "mp3";
-          else ext = "webm";
-        }
-        
-        const fileObj = typeof File !== "undefined"
-          ? new File([wavBuffer], `voice.${ext}`, { type: mime })
-          : new Blob([wavBuffer], { type: mime });
-          
-        formData.append("file", fileObj as any, `voice.${ext}`);
+        const fileBlob = new Blob([wavBuffer], { type: "audio/wav" });
+        formData.append("file", fileBlob, "voice.wav");
         if (targetLang !== "unknown") {
           formData.append("language_code", targetLang);
         }
@@ -1399,16 +1368,59 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
           body: formData,
         });
 
-        const contentType = response.headers.get("content-type") || "";
-        if (contentType.includes("application/json")) {
+        if (response.ok) {
           const data: any = await response.json();
           const text = data?.transcript?.trim();
           if (text && !isHallucinatedTranscript(text)) {
+            console.log(`[STT Success] Sarvam Saaras v4 transcribed (${language || 'auto'}): "${text}"`);
             return res.json({ transcript: text, provider: "sarvam" });
           }
+        } else {
+          const errText = await response.text();
+          console.warn("Sarvam STT non-ok response:", response.status, errText);
         }
       } catch (sarvamErr: any) {
-        console.warn("Sarvam STT failed, attempting Groq Whisper:", sarvamErr?.message);
+        console.warn("Sarvam STT failed, attempting backup provider:", sarvamErr?.message);
+      }
+    }
+
+    // 2. Second Priority: Gemini Flash Multimodal STT (if valid GEMINI_API_KEY is present)
+    const geminiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_GENAI_API_KEY;
+    if (geminiKey && !geminiKey.startsWith("AQ.Ab8") && geminiKey !== "YOUR_GEMINI_API_KEY") {
+      try {
+        const audioBase64 = req.file.buffer.toString("base64");
+        const mimeType = req.file.mimetype || "audio/webm";
+        let langInstruction = "Transcribe this audio accurately. Return ONLY the transcribed spoken text without commentary.";
+        if (isKannada) {
+          langInstruction = "Transcribe this Kannada audio accurately in Kannada script. Return ONLY the transcribed text.";
+        } else if (language === "Hindi" || language === "hi-IN") {
+          langInstruction = "Transcribe this Hindi audio accurately in Devanagari script. Return ONLY the transcribed text.";
+        }
+
+        const restUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${geminiKey}`;
+        const restRes = await fetchWithTimeout(restUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { inline_data: { mime_type: mimeType, data: audioBase64 } },
+                { text: langInstruction }
+              ]
+            }]
+          })
+        }, 8000);
+
+        if (restRes.ok) {
+          const restData: any = await restRes.json();
+          const text = restData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+          if (text && !isHallucinatedTranscript(text)) {
+            console.log(`[STT Success] Gemini Flash transcribed (${language || 'English'}): "${text}"`);
+            return res.json({ transcript: text, provider: "gemini-flash" });
+          }
+        }
+      } catch (geminiErr: any) {
+        console.warn("Gemini Flash STT notice:", geminiErr?.message);
       }
     }
 

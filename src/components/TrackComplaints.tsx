@@ -97,7 +97,7 @@ export default function TrackComplaints({ profile, onOpenProfile }: TrackComplai
       {/* Header section */}
       <div className="text-center space-y-2">
         <h2 className="text-2xl font-bold text-white tracking-tight">Track Your Complaints</h2>
-        <p className="text-xs text-white max-w-md mx-auto">
+        <p className="text-sm text-white font-medium max-w-md mx-auto">
           Viewing all complaints and official resolutions registered under your phone number.
         </p>
       </div>
