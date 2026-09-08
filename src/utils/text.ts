@@ -20,3 +20,22 @@ export function stripEmojis(text: string): string {
     .replace(/\s+/g, ' ')
     .trim();
 }
+
+/**
+ * Detects the dominant script of a text so the assistant can automatically
+ * follow the user's language (e.g. a Kannada voice note must be answered in
+ * Kannada, never English). Returns "Kannada" | "Hindi" | "English".
+ */
+export function detectTextScript(text: string): 'Kannada' | 'Hindi' | 'English' {
+  if (!text) return 'English';
+  let kannada = 0;
+  let devanagari = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0) || 0;
+    if (code >= 0x0c80 && code <= 0x0cff) kannada++;
+    else if (code >= 0x0900 && code <= 0x097f) devanagari++;
+  }
+  if (kannada > devanagari && kannada > 0) return 'Kannada';
+  if (devanagari > 0) return 'Hindi';
+  return 'English';
+}

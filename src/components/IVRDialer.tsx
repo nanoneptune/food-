@@ -77,6 +77,15 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const processingSpeechRef = useRef<boolean>(false);
   const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
+  // CRITICAL: the language the IVR is ACTUALLY using right now. Speech
+  // recognition and TTS must read this ref (not the React state) because after
+  // the caller presses 1, listening is started from an older render closure —
+  // reading stale state was why the IVR kept listening/answering in English
+  // after the caller had already chosen Kannada.
+  const langRef = useRef<string>('en-IN');
+  // Per-call conversation memory passed to the server so nothing is re-asked.
+  const turnHistoryRef = useRef<{ role: 'user' | 'assistant'; content: string }[]>([]);
+
   // Web Audio Context initialization
   const getAudioContext = () => {
     if (!audioCtxRef.current) {
@@ -319,16 +328,22 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       return;
     }
 
+    // Sync the live language BEFORE speaking/restarting recognition so the
+    // follow-up listening session uses the language just selected.
+    langRef.current = targetLang;
+
     setIsIvrSpeaking(true);
     setStatusMessage(text);
     setLastIvrResponse(text);
 
     const handleSpeechEnd = () => {
       setIsIvrSpeaking(false);
-      startUserListening();
       if (onFinish) {
+        // Explicit follow-up action (record beep / end call after submit):
+        // do NOT open the mic afterwards.
         onFinish();
       } else {
+        startUserListening();
         startSilenceWatch();
       }
     };
@@ -423,7 +438,9 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       const recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = true;
-      recognition.lang = language;
+      // Use the LIVE language ref — after pressing 1 the closure may still hold
+      // the pre-press 'en-IN', which made Kannada speech get recognized as English.
+      recognition.lang = langRef.current;
 
       recognition.onstart = () => {
         setIsListening(true);
@@ -546,6 +563,8 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const startCall = async () => {
     getAudioContext();
     clearSilenceTimers();
+    turnHistoryRef.current = [];
+    langRef.current = 'en-IN';
     setCallActive(true);
     setCallDuration(0);
     setIvrStep('welcome');
@@ -617,6 +636,17 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     clearSilenceTimers();
     setStatusMessage('AI is analyzing complaint...');
 
+    // Remember what the caller said/pressed (conversation memory) so the server
+    // never re-asks an already-answered question.
+    if (message && message.trim()) {
+      turnHistoryRef.current.push({ role: 'user', content: message.trim() });
+    } else if (digits) {
+      turnHistoryRef.current.push({ role: 'user', content: `Pressed key ${digits}` });
+    }
+    if (turnHistoryRef.current.length > 40) {
+      turnHistoryRef.current = turnHistoryRef.current.slice(-30);
+    }
+
     try {
       const response = await fetch('/api/ivr/dialogue', {
         method: 'POST',
@@ -629,7 +659,8 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
           profile,
           collectedData,
           audioNoteUrl: inputAudioUrl,
-          isVoiceNote
+          isVoiceNote,
+          history: turnHistoryRef.current.slice(-12)
         })
       });
 
@@ -639,12 +670,18 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
       if (data.language && data.language !== language) {
         setLanguage(data.language);
+        langRef.current = data.language; // sync immediately (no stale closure)
       }
       if (data.collectedData) {
         setCollectedData(data.collectedData);
       }
       if (data.nextStep) {
         setIvrStep(data.nextStep);
+      }
+
+      // Record the IVR reply into the conversation memory.
+      if (data.text) {
+        turnHistoryRef.current.push({ role: 'assistant', content: data.text });
       }
 
       // Handle Press 7 Flow (Voice Note Recording)
@@ -658,9 +695,13 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
         return;
       }
 
-      // Normal prompt speaking
+      // Normal prompt speaking; when the complaint was submitted, end the call
+      // automatically after the confirmation is read out.
       if (data.text) {
-        speakIVR(data.text, data.audioUrl, data.language || language);
+        const onFinish = data.nextStep === 'submitted' && data.isComplaintReady
+          ? () => endCall()
+          : undefined;
+        speakIVR(data.text, data.audioUrl, data.language || language, onFinish);
       }
     } catch (err) {
       console.error("IVR interaction failed:", err);
@@ -792,6 +833,11 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       }
     };
   }, []);
+
+  // Keep the live language ref in sync with the React state at all times.
+  useEffect(() => {
+    langRef.current = language;
+  }, [language]);
 
   return (
     <div className="max-w-md mx-auto px-4 py-2 flex flex-col items-center justify-between min-h-[calc(100vh-6rem)]">

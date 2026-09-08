@@ -6,7 +6,7 @@ import { VoiceInteraction, UserProfile } from '../types';
 import ParticleBall from './ParticleBall';
 import { RenderedMarkdown } from './RenderedMarkdown';
 import { transcribeAudioInBrowser } from '../lib/clientWhisper';
-import { stripEmojis } from '../utils/text';
+import { stripEmojis, detectTextScript } from '../utils/text';
 
 function isHallucinatedText(text: string): boolean {
   if (!text || !text.trim()) return true;
@@ -74,6 +74,14 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const vadIntervalRef = useRef<any>(null);
   const hasSpokenRef = useRef<boolean>(false);
   const lastSoundTimeRef = useRef<number>(0);
+  // Counts silent auto-restarts of the browser recognizer (used to stop the mic
+  // when only low/quiet sound is present instead of listening forever).
+  const silentRestartsRef = useRef<number>(0);
+  // When the current listening round started (used to give gentle feedback when
+  // the user held the mic but nothing was heard for a while).
+  const listenStartRef = useRef<number>(0);
+  // Guards against spamming the same "couldn't hear you" prompt repeatedly.
+  const lastNoSpeechPromptRef = useRef<number>(0);
 
   const updateListeningState = (val: boolean) => {
     isListeningRef.current = val;
@@ -201,9 +209,17 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           source.connect(analyser);
 
           const dataArray = new Uint8Array(analyser.frequencyBinCount);
-          
+          const vadStartedAt = Date.now();
+          let lastVoiceAt = 0;
+          let vadAutoStopped = false;
+
+          // Amplitude-based Voice Activity Detection (VAD):
+          // - Tracks voice energy so the assistant knows the user actually spoke.
+          // - STOPS recording automatically when the sound level stays low for a
+          //   short while after speech (~1.8s of quiet) or after a max cap, so
+          //   silence is never recorded and sent to the STT engine.
           vadIntervalRef.current = setInterval(() => {
-            if (!isListeningRef.current) return;
+            if (!isListeningRef.current || vadAutoStopped) return;
             analyser.getByteFrequencyData(dataArray);
             let sum = 0;
             for (let i = 0; i < dataArray.length; i++) {
@@ -211,12 +227,31 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             }
             const average = sum / dataArray.length;
 
-            // Only track sound activity when speech text has actually started capturing
-            if (average > 8 && transcriptRef.current.trim().length > 0) {
+            // Voice-level energy present
+            if (average > 10) {
+              lastVoiceAt = Date.now();
               hasSpokenRef.current = true;
               lastSoundTimeRef.current = Date.now();
             }
-          }, 100);
+
+            const quietMs = lastVoiceAt ? (Date.now() - lastVoiceAt) : (Date.now() - vadStartedAt);
+            const quietSinceSpeechMs = 1800; // 1.8s of low sound after speech → done
+            const maxTotalMs = 20000;        // hard cap: never record silence forever
+            const shouldStop =
+              (lastVoiceAt > 0 && quietMs > quietSinceSpeechMs) ||
+              (!lastVoiceAt && quietMs > maxTotalMs) ||
+              (lastVoiceAt > 0 && quietMs > maxTotalMs);
+
+            if (shouldStop && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+              vadAutoStopped = true;
+              if (vadIntervalRef.current) {
+                clearInterval(vadIntervalRef.current);
+                vadIntervalRef.current = null;
+              }
+              // Stop, transcribe and send automatically (recorder fallback mode).
+              stopListeningAndSend(true);
+            }
+          }, 120);
         }
       } catch (vadErr) {
         console.warn("VAD audio analyser notice:", vadErr);
@@ -375,13 +410,14 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
             setTranscript(cleanText);
             hasSpokenRef.current = true;
             lastSoundTimeRef.current = Date.now();
+            silentRestartsRef.current = 0;
 
             // User barge-in: If user speaks while AI audio is active, stop AI speech immediately
             if (isSpeakingRef.current || activeAudioRef.current) {
               stopSpeaking();
             }
 
-            // Silence Detection: auto-send after 4s of silence following real speech.
+            // Silence Detection: auto-send after ~3.2s of quiet following real speech.
             // The timer only fires when the user has actually stopped talking, so natural
             // mid-sentence pauses no longer send a half-heard question.
             if (silenceTimerRef.current) {
@@ -391,7 +427,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               if (isListeningRef.current && transcriptRef.current.trim()) {
                 stopListeningAndSend();
               }
-            }, 4000);
+            }, 3200);
           }
         };
 
@@ -418,6 +454,17 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               }
             }
             interimTranscriptRef.current = '';
+
+            // LOW-SOUND WATCHDOG: if recognition keeps ending with no speech at all
+            // (quiet background / the user is not talking), stop listening after a
+            // few silent restarts instead of looping forever, and prompt politely.
+            if (!finalTranscriptRef.current.trim()) {
+              silentRestartsRef.current += 1;
+              if (silentRestartsRef.current >= 4) {
+                stopListeningAndSend(true);
+                return;
+              }
+            }
             try {
               recognition.start();
             } catch {}
@@ -517,7 +564,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
   };
 
-  const speak = async (text: string, audioUrl?: string, messageId?: string) => {
+  const speak = async (text: string, audioUrl?: string, messageId?: string, speakLang?: string) => {
     if (!text) return;
 
     // Toggle Mute: If clicking audio icon of the message that is CURRENTLY PLAYING, mute/stop it immediately!
@@ -532,8 +579,12 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     const textToSpeak = stripEmojis(text);
     if (!textToSpeak) return;
 
+    // Speak in the language the USER actually used (explicit override) or the
+    // current UI language — never force Kannada text through an English voice.
+    const effectiveLang = (speakLang || language) as 'English' | 'Hindi' | 'Kannada';
+
     // 1ST PRIORITY: Browser Google Speech Synthesis (Instant, Fast, 0ms network latency!)
-    const browserSpoke = speakWithBrowserGoogle(textToSpeak, language);
+    const browserSpoke = speakWithBrowserGoogle(textToSpeak, effectiveLang);
     if (browserSpoke) {
       return;
     }
@@ -564,7 +615,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: textToSpeak, language })
+        body: JSON.stringify({ text: textToSpeak, language: effectiveLang })
       });
 
       const contentType = res.headers.get('content-type') || '';
@@ -591,7 +642,30 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
   };
 
-  const stopListeningAndSend = async () => {
+  // Gentle, non-repetitive feedback when nothing was heard. In the failing case
+  // it also points the user to add a PHOTO of the problem (never silence).
+  const pushNoSpeechHelp = () => {
+    const now = Date.now();
+    if (now - lastNoSpeechPromptRef.current < 6000) return; // avoid spam
+    lastNoSpeechPromptRef.current = now;
+
+    const noSpeechText = language === 'Kannada'
+      ? "ಕ್ಷಮಿಸಿ, ನಿಮ್ಮ ಮಾತು ಸ್ಪಷ್ಟವಾಗಿ ಕೇಳಿಸಲಿಲ್ಲ. ದಯವಿಟ್ಟು ಮತ್ತೊಮ್ಮೆ ಪ್ರಯತ್ನಿಸಿ, ಟೈಪ್ ಮಾಡಿ, ಅಥವಾ ಸಮಸ್ಯೆಯ ಆಹಾರದ ಫೋಟೋ ಸೇರಿಸಿ."
+      : language === 'Hindi'
+        ? "माफ़ कीजिए, आपकी आवाज़ स्पष्ट नहीं सुनाई दी। कृपया फिर से बोलें, टाइप करें, या समस्या की फोटो जोड़ें।"
+        : "Sorry, I couldn't hear you clearly. Please try once more, type your issue, or add a photo of the problem so we can help faster.";
+
+    const helpMsg: VoiceInteraction = {
+      id: (Date.now() + 1).toString(),
+      text: noSpeechText,
+      sender: 'assistant',
+      timestamp: Date.now(),
+    };
+    setMessages(prev => [...prev, helpMsg]);
+    speak(noSpeechText, undefined, helpMsg.id, language);
+  };
+
+  const stopListeningAndSend = async (showNoSpeechHelp = false) => {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
@@ -642,12 +716,22 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         transcriptRef.current = '';
         finalTranscriptRef.current = '';
         interimTranscriptRef.current = '';
+        // A recording was attempted but the STT heard nothing (low/quiet sound).
+        if (showNoSpeechHelp) {
+          pushNoSpeechHelp();
+        }
       }
     } else {
       setTranscript('');
       transcriptRef.current = '';
       finalTranscriptRef.current = '';
       interimTranscriptRef.current = '';
+      // No transcript at all: only nudge if listening ran a while or the silent
+      // watchdog asked for it — quick accidental taps stay silent.
+      const listenedMs = Date.now() - listenStartRef.current;
+      if (showNoSpeechHelp || listenedMs >= 2500) {
+        pushNoSpeechHelp();
+      }
     }
   };
 
@@ -661,6 +745,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     transcriptRef.current = '';
     finalTranscriptRef.current = '';
     interimTranscriptRef.current = '';
+    silentRestartsRef.current = 0;
+    listenStartRef.current = Date.now();
     updateListeningState(true);
     
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -747,6 +833,15 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       return;
     }
 
+    // LANGUAGE FOLLOW: reply and speak in the language the user actually used.
+    // Kannada/Hindi text (typed or recognized) overrides the English UI pill so
+    // the assistant never answers English to a Kannada speaker.
+    const queryScript = detectTextScript(queryText);
+    const effectiveLang = (queryScript !== 'English' ? queryScript : language) as 'English' | 'Hindi' | 'Kannada';
+    if (effectiveLang !== language) {
+      setLanguage(effectiveLang);
+    }
+
     const recentHistory = messages.slice(-8).map(m => ({
       role: m.sender === 'user' ? 'user' : 'assistant',
       content: m.text
@@ -761,7 +856,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         body: JSON.stringify({ 
           message: queryText, 
           history: recentHistory,
-          language, 
+          language: effectiveLang, 
           profile,
           chatCount: userTurnCount
         })
@@ -790,7 +885,16 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       };
       
       setMessages(prev => [...prev, assistantMsg]);
-      speak(spokenVoiceText, data.audioUrl, assistantMsg.id);
+
+      // Speak the reply in the language the user actually used (server confirms
+      // it via detectedLanguage when it overrode the request language).
+      const replyLang = data.detectedLanguage && ['English', 'Hindi', 'Kannada'].includes(data.detectedLanguage)
+        ? data.detectedLanguage as 'English' | 'Hindi' | 'Kannada'
+        : effectiveLang;
+      if (replyLang !== language) {
+        setLanguage(replyLang);
+      }
+      speak(spokenVoiceText, data.audioUrl, assistantMsg.id, replyLang);
 
       // Detect if AI suggested a complaint
       if (data.isComplaintDraft) {
@@ -803,9 +907,9 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     } catch (error: any) { 
       console.error("Chat error:", error);
       let errorText = "I'm having trouble connecting to the AI service. Please try again shortly.";
-      if (language === 'Kannada') {
+      if (effectiveLang === 'Kannada') {
         errorText = "ಕ್ಷಮಿಸಿ, ಸೇವೆಯನ್ನು ಸಂಪರ್ಕಿಸುವಲ್ಲಿ ಅಡಚಣೆ ಉಂಟಾಗಿದೆ. ದಯವಿಟ್ಟು ಸ್ವಲ್ಪ ಸಮಯದ ನಂತರ ಪುನಃ ಪ್ರಯತ್ನಿಸಿ.";
-      } else if (language === 'Hindi') {
+      } else if (effectiveLang === 'Hindi') {
         errorText = "माफ़ कीजिए, सेवा से कनेक्ट करने में समस्या आ रही है। कृपया थोड़ी देर बाद पुनः प्रयास करें।";
       }
 
@@ -816,7 +920,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         timestamp: Date.now()
       };
       setMessages(prev => [...prev, fallbackMsg]);
-      speak(fallbackMsg.text);
+      speak(fallbackMsg.text, undefined, fallbackMsg.id, effectiveLang);
     } finally { 
       setIsLoading(false); 
       setTranscript(''); 
