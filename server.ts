@@ -326,11 +326,11 @@ app.all("/api/voice", (req: any, res: any) => {
     timeout: 6,
   });
 
-  // 1 for Kannada, 2 for Hindi, 3 for English
-  gather.say({ voice: "Google.en-IN-Standard-A" as any }, "Welcome to VoxAssist.");
-  gather.say({ voice: "Google.kn-IN-Standard-A" as any, language: "kn-IN" as any }, "ಕನ್ನಡಕ್ಕಾಗಿ ಒಂದನ್ನು ಒತ್ತಿ."); // Kannadakkagi ondanna otti
-  gather.say({ voice: "Google.hi-IN-Wavenet-A" as any, language: "hi-IN" as any }, "हिंदी के लिए दो दबाएं।"); // Hindi ke liye 2 dabaye
-  gather.say({ voice: "Google.en-IN-Standard-A" as any }, "For English, press 3.");
+  // 1 for Kannada, 2 for Hindi, 3 for English.
+  // Only the first (Kannada) line carries the welcome; 2 and 3 are short instructions.
+  gather.say({ voice: "Google.kn-IN-Standard-A" as any, language: "kn-IN" as any }, "ನಮಸ್ಕಾರ! VoxAssist ಆಹಾರ ಸುರಕ್ಷತಾ ಸಹಾಯವಾಣಿಗೆ ಸ್ವಾಗತ. ಕನ್ನಡಕ್ಕಾಗಿ ಒಂದನ್ನು ಒತ್ತಿ.");
+  gather.say({ voice: "Google.hi-IN-Wavenet-A" as any, language: "hi-IN" as any }, "हिंदी के लिए दो दबाएं।");
+  gather.say({ voice: "Google.en-IN-Standard-A" as any, language: "en-IN" as any }, "For English, press 3.");
 
   twiml.say({ voice: "Google.en-IN-Standard-A" as any }, "No selection received. Please try calling again.");
   twiml.redirect("/api/voice");
@@ -353,18 +353,18 @@ app.all("/api/voice/menu-select", (req: any, res: any) => {
   if (digits === "1" || speech.includes("kannada") || speech.includes("ondanna")) {
     selectedLang = "kn-IN";
     langName = "Kannada";
-    greetingText = "ನಮಸ್ಕಾರ! VoxAssist AI ಸಹಾಯಕ್ಕೆ ಸ್ವಾಗತ. ನಿಮ್ಮ ಪ್ರಶ್ನೆ ಅಥವಾ ಸಮಸ್ಯೆಯನ್ನು ಹೇಳಿ.";
+    greetingText = "ನಮಸ್ಕಾರ! ದಯವಿಟ್ಟು ನಿಮ್ಮ ಪ್ರಶ್ನೆ ಅಥವಾ ದೂರನ್ನು ತಿಳಿಸಿ.";
     ttsVoice = "Google.kn-IN-Standard-A";
   } else if (digits === "2" || speech.includes("hindi") || speech.includes("do")) {
     selectedLang = "hi-IN";
     langName = "Hindi";
-    greetingText = "नमस्ते! VoxAssist AI सहायक में आपका स्वागत है। आप अपनी समस्या या प्रश्न बताएं।";
+    greetingText = "नमस्ते! कृपया अपना प्रश्न या शिकायत बताएं।";
     ttsVoice = "Google.hi-IN-Wavenet-A";
   } else if (digits === "3" || speech.includes("english") || speech.includes("three")) {
-    selectedLang = "en-US";
+    selectedLang = "en-IN";
     langName = "English";
-    greetingText = "Hello! Welcome to VoxAssist AI Support. How can I assist you today?";
-    ttsVoice = "Polly.Joanna";
+    greetingText = "Hello! Please tell me your question or complaint.";
+    ttsVoice = "Google.en-IN-Standard-A";
   } else {
     // Invalid key fallback
     const retryGather = twiml.gather({
@@ -415,44 +415,47 @@ app.all("/api/voice/respond", async (req: any, res: any) => {
   if (selectedLang === "kn-IN") {
     ttsVoice = "Google.kn-IN-Standard-A";
     noSpeechMessage = "ಕ್ಷಮಿಸಿ, ನಿಮ್ಮ ದ್ವನಿ ಕೇಳಿಸಲಿಲ್ಲ. ದಯವಿಟ್ಟು ಮತ್ತೊಮ್ಮೆ ಹೇಳಿ.";
-  } else if (selectedLang === "en-US") {
-    ttsVoice = "Polly.Joanna";
+  } else if (selectedLang.startsWith("en")) {
+    ttsVoice = "Google.en-IN-Standard-A";
     noSpeechMessage = "Sorry, I didn't catch that. Please try speaking again.";
   }
 
+  const respondUrl = `/api/voice/respond?lang=${encodeURIComponent(selectedLang)}&langName=${encodeURIComponent(langName)}`;
+
   if (!userSpeech || !userSpeech.trim()) {
+    // No speech: re-ask in the SAME language instead of jumping back to the full menu.
     const gather = twiml.gather({
       input: ["speech"],
-      action: `/api/voice/respond?lang=${encodeURIComponent(selectedLang)}&langName=${encodeURIComponent(langName)}`,
+      action: respondUrl,
       method: "POST",
       speechTimeout: "auto",
       timeout: 6,
       language: selectedLang as any,
     });
     gather.say({ voice: ttsVoice as any }, noSpeechMessage);
-    twiml.redirect("/api/voice");
+    twiml.redirect(respondUrl);
     res.type("text/xml");
     return res.send(twiml.toString());
   }
 
   try {
     const aiResponse = await runLLMGeneration({
-      system: `You are VoxAssist, a helpful AI customer support agent answering phone calls. The caller selected ${langName}. You MUST respond exclusively in ${langName}. Keep spoken responses concise, empathetic, and natural (1 to 2 short sentences max).`,
+      system: `You are VoxAssist, a helpful AI customer support agent answering phone calls. The caller selected ${langName}. You MUST respond exclusively in ${langName}. Keep spoken responses concise, empathetic, and natural (1 to 2 short sentences max). Use only plain words: NO emojis, NO markdown, NO symbols like #, |, *, ^, &, and NO tables — it will be read aloud by a text-to-speech engine. Do not repeat the caller's question back and do not ask the same question twice.`,
       prompt: userSpeech,
     });
 
     let fallbackReply = "धन्यवाद! हम आपकी सहायता के लिए यहाँ हैं।";
     if (selectedLang === "kn-IN") {
       fallbackReply = "ಧನ್ಯವಾದಗಳು! ನಿಮ್ಮ ಸಹಾಯಕ್ಕಾಗಿ ನಾವು ಇಲ್ಲಿದ್ದೇವೆ.";
-    } else if (selectedLang === "en-US") {
+    } else if (selectedLang.startsWith("en")) {
       fallbackReply = "Thank you! We are here to assist you.";
     }
 
-    const replyText = aiResponse || fallbackReply;
+    const replyText = sanitizeSpeechText(aiResponse || fallbackReply);
 
     const gather = twiml.gather({
       input: ["speech"],
-      action: `/api/voice/respond?lang=${encodeURIComponent(selectedLang)}&langName=${encodeURIComponent(langName)}`,
+      action: respondUrl,
       method: "POST",
       speechTimeout: "auto",
       timeout: 6,
@@ -461,16 +464,17 @@ app.all("/api/voice/respond", async (req: any, res: any) => {
 
     gather.say({ voice: ttsVoice as any }, replyText);
 
-    // Prompt for further questions in selected language
+    // Prompt for further questions in selected language, then STAY in this
+    // conversation loop (never send the caller back to the language menu).
     let followUp = "क्या आपको किसी और चीज़ में मदद चाहिए?";
     if (selectedLang === "kn-IN") {
       followUp = "ನಿಮಗೆ ಬೇರೆ ಯಾವುದೇ ಸಹಾಯ ಬೇಕೇ?";
-    } else if (selectedLang === "en-US") {
+    } else if (selectedLang.startsWith("en")) {
       followUp = "Is there anything else I can help you with?";
     }
 
     twiml.say({ voice: ttsVoice as any }, followUp);
-    twiml.redirect("/api/voice");
+    twiml.redirect(respondUrl);
   } catch (err: any) {
     console.error("IVR processing error:", err?.message || err);
     twiml.say({ voice: ttsVoice as any }, "Technical issue encountered. Please try calling back later.");
@@ -623,9 +627,78 @@ function stripEmojis(text: string): string {
     .trim();
 }
 
+// Convert any text into clean speakable plain sentences: no emojis, no markdown,
+// no table pipes, and no symbols (&, ^, | ...) that a TTS engine would read aloud.
+function sanitizeSpeechText(text: string): string {
+  if (!text) return '';
+  return stripEmojis(text)
+    .replace(/&/g, ' and ')
+    .replace(/[|^\\>]/g, ' ')
+    .replace(/[•●◦▪▫►◄★☆✦✧]/gu, ' ')
+    .replace(/[“”]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Extract the first balanced JSON object from an LLM reply, ignoring any
+// surrounding prose or ```json code fences (strict parsers choke on those).
+function extractJsonBlock(text: string): string {
+  if (!text) return '';
+  let t = text.trim();
+  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) t = fence[1].trim();
+  const start = t.indexOf('{');
+  const end = t.lastIndexOf('}');
+  if (start === -1 || end <= start) return t;
+  return t.slice(start, end + 1);
+}
+
+// Map app language names/codes to Sarvam TTS language codes
+function sarvamLangCode(language: string): string {
+  const l = (language || '').toLowerCase();
+  if (l.includes('kn') || l.includes('kannada')) return 'kn-IN';
+  if (l.includes('hi') || l.includes('hindi')) return 'hi-IN';
+  return 'en-IN';
+}
+
+// High-fidelity neural TTS via Sarvam AI: natural, human-sounding Indian voices
+// for English, Hindi and Kannada. Returns base64 WAV audio or null on failure.
+async function sarvamTextToSpeech(text: string, language: string): Promise<string | null> {
+  const apiKey = process.env.SARVAM_API_KEY;
+  const clean = sanitizeSpeechText(text);
+  if (!apiKey || apiKey === "YOUR_SARVAM_API_KEY" || !clean) return null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    const res = await fetch("https://api.sarvam.ai/text-to-speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-subscription-key": apiKey,
+      },
+      body: JSON.stringify({
+        target_language_code: sarvamLangCode(language),
+        speaker: process.env.SARVAM_TTS_SPEAKER || "aditya",
+        model: process.env.SARVAM_TTS_MODEL || "bulbul:v3",
+        speech_sample_rate: 22050,
+        inputs: [clean.slice(0, 900)],
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data: any = await res.json();
+    const audio = data?.audios?.[0];
+    return typeof audio === "string" && audio.length > 100 ? audio : null;
+  } catch (e: any) {
+    console.warn("Sarvam TTS notice:", e?.message);
+    return null;
+  }
+}
+
 // Helper to generate & upload TTS audio to Cloudinary for instant playback
 async function generateTTSAudioUrl(text: string, language: string): Promise<string | null> {
-  // Groq does not have a TTS endpoint. We return null, the client will rely on browser synthesis.
+  // Audio is synthesized on demand through /api/tts (Sarvam), so no pre-generated URL is stored.
   return null;
 }
 
@@ -671,7 +744,7 @@ app.post("/api/chat", async (req, res) => {
             }
           }
           return res.json({
-            response: matchedRow.answer,
+            response: sanitizeSpeechText(matchedRow.answer),
             audioUrl: audioUrl || null,
             cached: true,
             isComplaintDraft: false
@@ -718,14 +791,21 @@ TARGET RESPONSE LANGUAGE: ${language || "English"}.
 STRICT CONVERSATION & RESPONSE RULES:
 1. INFORMATIONAL QUESTIONS:
    - If the citizen asks a question about food safety regulations, FSSAI licensing, hygiene inspection rules, adulteration testing, food safety laws, or penalties, answer directly, precisely, and accurately with statutory guidance in the requested language (${language || "English"}).
-   - Always use polite, respectful honorifics in Kannada (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ).
+   - Use polite, respectful honorifics ONLY when the target language is Kannada (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ) or Hindi (नमस्ते, कृपया). NEVER open an English reply with Kannada or Hindi greetings.
+
+3. ANSWER FORMAT (CRITICAL — replies are read aloud by a voice assistant):
+   - Answer in natural, plain, conversational sentences, exactly like a helpful human advisor speaking — never in a robotic or bullet style.
+   - NEVER use emojis, markdown symbols (hash, star, underscore, backtick, pipe, greater-than, tilde), tables, or characters like ^ and & anywhere in a normal reply.
+   - NEVER create tables for responses. If details are needed, put them into natural sentences.
+   - Do not ask generic repeated questions such as "How may I assist you?" after the citizen has already asked something.
+   - Do not interrogate the citizen: if they describe a full situation in one message, acknowledge it and continue. Ask only for a genuinely missing required detail (place, time, or what went wrong), and never ask the same question twice.
 
 2. COMPLAINT & GRIEVANCE REPORTING FLOW:
    - When the citizen reports a specific food safety violation, unhygienic restaurant/vendor, spoiled/contaminated food, food poisoning incident, or foreign object (insects, hair, glass, chemical odor):
-     a) Express high empathy and serious concern for consumer health.
+     a) Express high empathy and serious concern for consumer health in plain language.
      b) Note down the incident details: WHERE (outlet/vendor/location), WHEN (date & time), and CAUSES/VIOLATIONS (symptoms, items, contamination details).
      c) If key details are missing, ask for them politely one by one.
-     d) Once details are clear, generate the official Food Safety Grievance Report using the Markdown structure below, and append COMPLAINT_DRAFT_REQUEST at the end.
+     d) Once details are clear, first write one short reassuring sentence, then generate the official Food Safety Grievance Report using the Markdown structure below, and append COMPLAINT_DRAFT_REQUEST at the end.
 
 HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
 # 📋 Official Food Safety & Inspection Grievance Report
@@ -790,7 +870,7 @@ HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
     }
 
     const isComplaintDraft = responseText.includes("COMPLAINT_DRAFT_REQUEST");
-    const cleanedText = responseText.replace(/COMPLAINT_DRAFT_REQUEST/g, "").trim();
+    let cleanedText = responseText.replace(/COMPLAINT_DRAFT_REQUEST/g, "").trim();
 
     let spokenPart = cleanedText;
     let markdownPart = "";
@@ -811,6 +891,13 @@ HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
           spokenPart = `We will take care further. Thank you${customerName}! Bye${customerName}, have a nice day!`;
         }
       }
+    }
+
+    // Normal answers must be clean, plain, speakable text (no emojis, markdown,
+    // tables, or symbols). Complaint drafts keep their structured report format.
+    if (!isComplaintDraft) {
+      cleanedText = sanitizeSpeechText(cleanedText);
+      spokenPart = cleanedText;
     }
 
     // Generate audio for fast playback & Cloudinary storage using spoken portion
@@ -876,15 +963,15 @@ app.post("/api/ivr/dialogue", async (req, res) => {
     if (digits === "1" || (step === "welcome" && (/1|one|kannada|ಕನ್ನಡ|ಒಂದು/i.test(message || "")))) {
       currentLang = "kn-IN";
       nextStep = "collecting_info";
-      replyText = "ನಮಸ್ಕಾರ! ಆಹಾರ ಸುರಕ್ಷತಾ ಪರಿಶೀಲನೆ ಸಹಾಯವಾಣಿಗೆ ಸ್ವಾಗತ. ದಯವಿಟ್ಟು ತಾವು ಎದುರಿಸಿದ ಆಹಾರ ನೈರ್ಮಲ್ಯ ಅಥವಾ ಕಲುಷಿತ ಆಹಾರದ ದೂರಿನ ಬಗ್ಗೆ ವಿವರವಾಗಿ ತಿಳಿಸಿ. ನಾವು ಸೂಕ್ತ ತನಿಖೆ ನಡೆಸುತ್ತೇವೆ.";
+      replyText = "ನಮಸ್ಕಾರ! ದಯವಿಟ್ಟು ನಿಮ್ಮ ಆಹಾರ ಸುರಕ್ಷತೆ ಅಥವಾ ನೈರ್ಮಲ್ಯ ದೂರನ್ನು ವಿವರವಾಗಿ ತಿಳಿಸಿ.";
     } else if (digits === "2" || (step === "welcome" && (/2|two|hindi|हिंदी|हिन्दी|दो|ಎರಡು/i.test(message || "")))) {
       currentLang = "hi-IN";
       nextStep = "collecting_info";
-      replyText = "नमस्ते! खाद्य सुरक्षा एवं निरीक्षण हेल्पलाइन में आपका स्वागत है। कृपया अपनी खाद्य सुरक्षा या स्वच्छता संबंधी शिकायत का विवरण बताएं। हम उचित जांच करेंगे।";
+      replyText = "नमस्ते! कृपया अपनी खाद्य सुरक्षा या स्वच्छता संबंधी समस्या विस्तार से बताएं।";
     } else if (digits === "3" || (step === "welcome" && (/3|three|english|ಇಂಗ್ಲಿಷ್|ಮೂರು|तीन/i.test(message || "")))) {
       currentLang = "en-IN";
       nextStep = "collecting_info";
-      replyText = "Welcome to the Food Safety & Standards Inspection Authority Helpline. Please describe the food safety, contamination, or hygiene issue you encountered. We will investigate immediately.";
+      replyText = "Hello! Please describe your food safety or hygiene issue in detail.";
     } 
     // 2. DTMF Key 7: Press 7 for Audio Voice Note Recording
     else if ((digits === "7" || /7|seven|record|voice note|audio note|ಧ್ವನಿ|ರೆಕಾರ್ಡ್|ಏಳು|ऑडियो|सात/i.test(message || "")) && !isVoiceNote && step !== "ready_for_beep") {
@@ -914,9 +1001,11 @@ Instructions:
 1. Extract any newly mentioned cause (what went wrong/details), location/where (restaurant name, branch, address), when (date or time), or food item name.
 2. Acknowledge what the caller spoke in their voice note in 1-2 calm, reassuring sentences.
 3. Then state clearly: "To submit your complaint now, press 9 or say confirm." (in ${currentLang}).
-4. Use polite Kannada/Hindi honorifics.
+4. Use polite Kannada/Hindi honorifics only when the language is Kannada or Hindi.
+5. spokenResponse must be plain spoken words only: no emojis, no markdown, no symbols, no tables.
+6. Never repeat details the customer already gave, and never ask for something already known.
 
-Respond in strict JSON:
+Respond with ONLY valid JSON (no markdown code fences, no extra text):
 {
   "cause": "updated or existing cause",
   "location": "updated or existing location",
@@ -927,7 +1016,7 @@ Respond in strict JSON:
 
         try {
           const aiResponse = await runLLMGeneration({ prompt }) || "{}";
-          const parsed = JSON.parse(aiResponse);
+          const parsed = JSON.parse(extractJsonBlock(aiResponse));
           if (parsed.cause) updatedData.cause = parsed.cause;
           if (parsed.location) updatedData.location = parsed.location;
           if (parsed.when) updatedData.when = parsed.when;
@@ -1041,18 +1130,17 @@ Customer just said: "${message}"
 Language: ${currentLang} (kn-IN for Kannada, hi-IN for Hindi, en-IN for English).
 
 Instructions:
-1. Identify any newly mentioned cause (what went wrong/details), location/where (restaurant name, branch, address), when (date or time), or food item name.
-2. If any of the following details are missing, calmly and politely ask the customer for them (one question at a time, with absolute politeness):
-   - WHERE (the specific restaurant, branch, or outlet name)
-   - WHEN (the date and approximate time of the incident)
-   - CAUSE / DETAILS (what was wrong with the food or service)
-3. When speaking Kannada, ALWAYS use polite and respectful honorifics (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ, ತಿಳಿಸಿಕೊಡಿ, ಕ್ಷಮಿಸಿ).
-4. If ALL THREE (Cause, Location/Where, and When) are now known:
+1. Understand what the customer actually said and behave naturally from their words. Identify any newly mentioned cause (what went wrong/details), location/where (restaurant name, branch, address), when (date or time), or food item name.
+2. Ask for a missing detail ONLY when it is genuinely missing. Ask at most ONE question at a time, and NEVER repeat a question the customer already answered.
+3. If the customer has already given enough information, do NOT keep interrogating them: acknowledge their message and move to the next step.
+4. When speaking Kannada, ALWAYS use polite and respectful honorifics (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ, ತಿಳಿಸಿಕೊಡಿ, ಕ್ಷಮಿಸಿ). In English, never use Kannada or Hindi greetings.
+5. If ALL THREE (Cause, Location/Where, and When) are now known:
    Calmly summarize the collected details and state:
    "If you would like to record a voice note, press 7. To submit your complaint now, press 9 or say confirm." (in the target language!).
-5. Keep your spoken response to 1-2 calm, highly polite, reassuring sentences.
+6. Keep your spoken response to 1-2 calm, highly polite, reassuring sentences in plain words only (no emojis, no markdown, no symbols, no tables).
+7. If you cannot identify any new detail from what the customer said, gently ask them to repeat only once in plain words.
 
-Respond in strict JSON:
+Respond with ONLY valid JSON (no markdown code fences, no extra text):
 {
   "cause": "updated or existing cause",
   "location": "updated or existing location",
@@ -1065,7 +1153,7 @@ Respond in strict JSON:
       const aiResponse = await runLLMGeneration({ prompt }) || "{}";
       let parsed: any = {};
       try {
-        parsed = JSON.parse(aiResponse);
+        parsed = JSON.parse(extractJsonBlock(aiResponse));
       } catch {
         parsed = {};
       }
@@ -1100,6 +1188,10 @@ Respond in strict JSON:
       }
     }
 
+    // Speak/display clean plain text only (no emojis, symbols, or markdown)
+    const cleanReply = sanitizeSpeechText(replyText);
+    if (cleanReply) replyText = cleanReply;
+
     // Attempt to generate TTS (currently returns null, relying on browser TTS)
     const audioUrl = await generateTTSAudioUrl(replyText, currentLang);
 
@@ -1118,11 +1210,24 @@ Respond in strict JSON:
   }
 });
 
-// API: Sarvam AI Text-to-Speech (TTS)
+// API: High-fidelity neural Text-to-Speech (Sarvam AI) - natural voices for
+// English, Hindi, and Kannada. The client falls back to this only when the
+// device has no matching native voice (e.g. Kannada/Hindi on desktop browsers).
 app.post("/api/tts", async (req, res) => {
-  // Groq does not currently support TTS. 
-  // We return a 501 Not Implemented so the frontend gracefully falls back to browser SpeechSynthesis.
-  res.status(501).json({ error: "Groq TTS not available. Defaulting to browser Speech Synthesis." });
+  const { text, language } = req.body;
+  if (!text || !text.trim()) {
+    return res.status(400).json({ error: "text is required" });
+  }
+  try {
+    const audioBase64 = await sarvamTextToSpeech(String(text), String(language || "English"));
+    if (audioBase64) {
+      return res.json({ audioBase64, format: "wav", provider: "sarvam" });
+    }
+    res.status(501).json({ error: "TTS unavailable. Falling back to browser Speech Synthesis." });
+  } catch (err: any) {
+    console.error("TTS endpoint error:", err);
+    res.status(500).json({ error: err.message || "TTS failed" });
+  }
 });
 
 // Helper to detect Whisper hallucinations on silent/quiet audio clips

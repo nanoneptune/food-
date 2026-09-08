@@ -457,7 +457,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       }
 
       utterance.lang = targetLangCode;
-      utterance.rate = 1.4; // 1.4X speed as requested
+      utterance.rate = 1.05; // Natural human speaking pace (not robotic fast)
       utterance.pitch = 1.0;
 
       // Find best available voice on the device (prioritize Google keyboard / Android / native voice)

@@ -281,7 +281,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
       const utterance = new SpeechSynthesisUtterance(stripEmojis(text));
       utterance.lang = langCode;
-      utterance.rate = 1.4; // 1.4X speech rate as requested
+      utterance.rate = 1.05; // Natural human speaking pace (not robotic fast)
       utterance.pitch = 1.0;
       if (voiceMatch) utterance.voice = voiceMatch;
 
@@ -514,10 +514,11 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     greetingCancelRef.current = false;
     clearSilenceTimers();
 
+    // Only the FIRST line (Kannada) carries the welcome; 2 and 3 are short instructions
     const options = [
-      { text: "ನಮಸ್ಕಾರ, ಆಹಾರ ಸುರಕ್ಷತಾ ಮತ್ತು ನೈರ್ಮಲ್ಯ ಪರಿಶೀಲನೆ ಸಹಾಯವಾಣಿಗೆ ತಮಗೆ ಆದರದ ಸ್ವಾಗತ. ಕನ್ನಡಕ್ಕಾಗಿ 1 ಒತ್ತಿ.", lang: "kn-IN" },
-      { text: "खाद्य सुरक्षा एवं निरीक्षण हेल्पलाइन में आपका स्वागत है। हिंदी के लिए 2 दबाएँ।", lang: "hi-IN" },
-      { text: "Welcome to the Food Safety & Standards Inspection Authority Helpline. For English, press 3.", lang: "en-IN" }
+      { text: "ನಮಸ್ಕಾರ! ಆಹಾರ ಸುರಕ್ಷತಾ ಮತ್ತು ನೈರ್ಮಲ್ಯ ಪರಿಶೀಲನೆ ಸಹಾಯವಾಣಿಗೆ ಸ್ವಾಗತ. ಕನ್ನಡಕ್ಕಾಗಿ 1 ಒತ್ತಿ.", lang: "kn-IN" },
+      { text: "हिंदी के लिए 2 दबाएँ।", lang: "hi-IN" },
+      { text: "For English, press 3.", lang: "en-IN" }
     ];
 
     for (let i = 0; i < options.length; i++) {
