@@ -403,9 +403,9 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               stopSpeaking();
             }
 
-            // Silence Detection: auto-send after ~3.2s of quiet following real speech.
-            // The timer only fires when the user has actually stopped talking, so natural
-            // mid-sentence pauses no longer send a half-heard question.
+            // Silence Detection: auto-send after ~1.5s of quiet following real
+            // speech — short enough that replies feel instant, long enough that
+            // natural mid-sentence pauses are not cut off.
             if (silenceTimerRef.current) {
               clearTimeout(silenceTimerRef.current);
             }
@@ -413,7 +413,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               if (isListeningRef.current && transcriptRef.current.trim()) {
                 stopListeningAndSend();
               }
-            }, 3200);
+            }, 1500);
           }
         };
 
@@ -483,30 +483,37 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     // current UI language — never force Kannada text through an English voice.
     const effectiveLang = (speakLang || language) as 'English' | 'Hindi' | 'Kannada';
 
-    // Voice output = SERVER neural TTS only (/api/tts, Sarvam). The browser's
-    // built-in speechSynthesis voice is deliberately NOT used for speaking.
+    // Voice output = SERVER neural TTS only (/api/tts — free Edge voices or
+    // Sarvam). The browser's built-in speechSynthesis voice is deliberately
+    // NOT used for speaking.
+    // 1.4x speaking speed (pitch preserved) — quick, energetic responses.
+    const playAudioEl = (audio: HTMLAudioElement) => {
+      try { audio.playbackRate = 1.4; } catch {}
+      audio.onplay = () => updateSpeakingState(true);
+      audio.onended = () => {
+        updateSpeakingState(false);
+        setPlayingMsgId(null);
+      };
+      audio.onerror = () => {
+        updateSpeakingState(false);
+        setPlayingMsgId(null);
+      };
+      activeAudioRef.current = audio;
+      return audio.play();
+    };
+
     // 1ST PRIORITY: Pre-generated audio URL (fast playback)
     if (audioUrl) {
       try {
         const audio = new Audio(audioUrl);
-        audio.onplay = () => updateSpeakingState(true);
-        audio.onended = () => {
-          updateSpeakingState(false);
-          setPlayingMsgId(null);
-        };
-        audio.onerror = () => {
-          updateSpeakingState(false);
-          setPlayingMsgId(null);
-        };
-        activeAudioRef.current = audio;
-        await audio.play();
+        await playAudioEl(audio);
         return;
       } catch (e) {
         console.warn("Direct audio URL playback notice:", e);
       }
     }
 
-    // 3RD PRIORITY: Server TTS (/api/tts)
+    // 2ND PRIORITY: Server TTS (/api/tts)
     try {
       const res = await fetch('/api/tts', {
         method: 'POST',
@@ -518,18 +525,10 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
         if (data && data.audioBase64) {
-          const audio = new Audio(`data:audio/wav;base64,${data.audioBase64}`);
-          audio.onplay = () => updateSpeakingState(true);
-          audio.onended = () => {
-            updateSpeakingState(false);
-            setPlayingMsgId(null);
-          };
-          audio.onerror = () => {
-            updateSpeakingState(false);
-            setPlayingMsgId(null);
-          };
-          activeAudioRef.current = audio;
-          await audio.play();
+          // mp3 (Edge) or wav (Sarvam) — pick the right MIME for the provider.
+          const mime = data.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+          const audio = new Audio(`data:${mime};base64,${data.audioBase64}`);
+          await playAudioEl(audio);
           return;
         }
       }

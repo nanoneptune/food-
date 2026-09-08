@@ -297,6 +297,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
           audioPlayerRef.current = new Audio();
         }
         audioPlayerRef.current.src = audioUrl;
+        try { audioPlayerRef.current.playbackRate = 1.4; } catch {} // quick 1.4x speech
         audioPlayerRef.current.onended = handleSpeechEnd;
         audioPlayerRef.current.onerror = () => {
           fallbackSpeech(cleanPrompt, targetLang, handleSpeechEnd);
@@ -308,7 +309,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       }
     }
 
-    // 2ND PRIORITY: High-fidelity server neural TTS (/api/tts, Sarvam)
+    // 2ND PRIORITY: High-fidelity server neural TTS (/api/tts — Edge free/Sarvam)
     fallbackSpeech(cleanPrompt, targetLang, handleSpeechEnd);
   };
 
@@ -321,7 +322,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
     const prefix = targetLang.slice(0, 2).toLowerCase();
 
-    // High-fidelity Sarvam AI audio fallback
+    // High-fidelity server neural TTS (/api/tts — free Edge voices / Sarvam)
     try {
       let langName = "English";
       if (prefix === "kn") langName = "Kannada";
@@ -339,7 +340,10 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
           if (!audioPlayerRef.current) {
             audioPlayerRef.current = new Audio();
           }
-          audioPlayerRef.current.src = `data:audio/wav;base64,${data.audioBase64}`;
+          // mp3 (Edge free TTS) or wav (Sarvam) — pick the correct MIME.
+          const mime = data.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+          audioPlayerRef.current.src = `data:${mime};base64,${data.audioBase64}`;
+          try { audioPlayerRef.current.playbackRate = 1.4; } catch {} // quick 1.4x speech
           audioPlayerRef.current.onended = () => onEnd();
           audioPlayerRef.current.onerror = () => onEnd();
           await audioPlayerRef.current.play();
@@ -406,7 +410,8 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
           localCapturedSpoken = cleanSpoken;
           setLastCallerSpoken(cleanSpoken);
           
-          // Wait for natural 2.5s silence before concluding user has finished speaking
+          // Wait for a short 1.5s silence before concluding the user has
+          // finished speaking — quick enough that replies feel instant.
           if (speechSilenceTimerRef.current) {
             clearTimeout(speechSilenceTimerRef.current);
           }
@@ -422,7 +427,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
               setIsListening(false);
               handleCallerSpeech(speechToProcess);
             }
-          }, 2500);
+          }, 1500);
         }
       };
 

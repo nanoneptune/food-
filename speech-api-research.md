@@ -40,4 +40,14 @@
   - Listening still uses the browser recognizer (primary) — unchanged.
   - Speaking goes: pre-generated `audioUrl` (if any) → server `/api/tts` (Edge neural, free). All `speechSynthesis.speak()` calls and browser-voice code removed; the synthesis object is kept only for `cancel()` cleanup.
 
+## Speed & latency tuning (2026-09-08)
+
+- **1.4× speaking speed**: all assistant audio plays at `playbackRate = 1.4` (pitch preserved) on both Talk and IVR screens.
+- **Cut the ~3 s delay** by reducing:
+  1. Post-speech silence auto-send: 3.2 s → **1.5 s** (Talk) and 2.5 s → **1.5 s** (web IVR) — this wait was a large part of the perceived delay.
+  2. TTS payload: Edge output switched from 24 kHz PCM WAV → **MP3 48 kbps** (~8× smaller transfer).
+  3. TTS connection overhead: one Edge WebSocket session is now **reused per voice** (new instances cost ~0.5 s handshake each request), serialized per voice.
+  4. LLM latency: default Groq model order now starts with the fast `llama-3.3-70b-versatile`; pin `GROQ_MODEL=openai/gpt-oss-120b` if accuracy matters more than speed.
+- Responses include the correct audio MIME (`audio/mpeg` for Edge mp3, `audio/wav` for Sarvam).
+
 Sources: [HF API model list (ai4bharat IndicConformer)](https://huggingface.co/api/models?author=ai4bharat&search=indicconformer) · [HF Kannada IndicConformer repo](https://huggingface.co/ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large) · [HF multilingual ONNX IndicConformer (restricted)](https://huggingface.co/ai4bharat/indic-conformer-600m-multilingual) · [Xenova/whisper-small (Apache-2.0, ONNX)](https://huggingface.co/Xenova/whisper-small) · [models.ai4bharat.org](https://models.ai4bharat.org/)

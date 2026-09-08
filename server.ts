@@ -93,15 +93,18 @@ async function runLLMGeneration({
     }
   }
 
-  // 1. Primary Option: Groq Fast LLM Inference. "openai/gpt-oss-120b" is the user-selected
-  //    working model; the rest are fallbacks if a model becomes unavailable.
+  // 1. Primary Option: Groq Fast LLM Inference. Ordered for QUICK responses —
+  //    fastest capable model first. Pin a specific model with GROQ_MODEL (e.g.
+  //    GROQ_MODEL=openai/gpt-oss-120b) when accuracy matters more than speed.
   const groqKey = process.env.GROQ_API_KEY;
-  const groqModels = [
-    "openai/gpt-oss-120b",
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
-    "openai/gpt-oss-20b",
-  ];
+  const groqModels = process.env.GROQ_MODEL
+    ? [process.env.GROQ_MODEL, "openai/gpt-oss-120b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    : [
+        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b",
+        "llama-3.1-8b-instant",
+        "openai/gpt-oss-20b",
+      ];
 
   if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
     for (const model of groqModels) {
@@ -1056,42 +1059,63 @@ function edgeTTSVoice(language: string): string {
   return process.env.TTS_EDGE_VOICE_EN || "en-IN-NeerjaNeural";
 }
 
-async function edgeTextToSpeech(text: string, language: string): Promise<{ audioBase64: string; voice: string } | null> {
-  try {
-    // Non-literal specifier so tsc does not hard-require the package to be
-    // installed at type-check time (it is declared in package.json and loaded
-    // lazily at runtime; run `npm install` before first use).
-    const edgePkg = "msedge-tts";
-    const mod: any = await import(edgePkg);
-    const MsEdgeTTS = mod.MsEdgeTTS || mod.default;
-    if (!MsEdgeTTS) {
-      console.warn("[TTS] msedge-tts package not available.");
+// MP3 (48 kbps) output — ~8x smaller payload than PCM WAV → much faster
+// transfer to the client while keeping identical spoken quality for a voice.
+const EDGE_OUTPUT_FORMAT = "audio-24khz-48kbitrate-mono-mp3";
+
+// Reuse one Edge WebSocket session per voice (new instances cost a ~0.5s
+// handshake every request — a big part of the perceived delay).
+const edgeTTSCache = new Map<string, { tts: any }>();
+let edgeLock: Promise<unknown> = Promise.resolve();
+function withEdgeLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = edgeLock.then(fn, fn);
+  edgeLock = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function edgeTextToSpeech(text: string, language: string): Promise<{ audioBase64: string; voice: string; format: string } | null> {
+  const clean = sanitizeSpeechText(text).slice(0, 900);
+  if (!clean) return null;
+  const voice = edgeTTSVoice(language);
+
+  return withEdgeLock(async () => {
+    try {
+      // Non-literal specifier so tsc does not hard-require the package to be
+      // installed at type-check time (it is declared in package.json and loaded
+      // lazily at runtime; run `npm install` before first use).
+      const edgePkg = "msedge-tts";
+      const mod: any = await import(edgePkg);
+      const MsEdgeTTS = mod.MsEdgeTTS || mod.default;
+      if (!MsEdgeTTS) {
+        console.warn("[TTS] msedge-tts package not available.");
+        return null;
+      }
+
+      let entry = edgeTTSCache.get(voice);
+      if (!entry) {
+        const tts = new MsEdgeTTS();
+        await tts.setMetadata(voice, EDGE_OUTPUT_FORMAT);
+        entry = { tts };
+        edgeTTSCache.set(voice, entry);
+      }
+
+      const result: any = entry.tts.synthesize(clean, { rate: 0, pitch: 0, volume: 0 });
+      const stream = result?.audio;
+      if (!stream) return null;
+
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      if (chunks.length === 0) return null;
+      return { audioBase64: Buffer.concat(chunks).toString("base64"), voice, format: "mp3" };
+    } catch (e: any) {
+      // Drop the stale connection so the next request rebuilds a fresh one.
+      edgeTTSCache.delete(voice);
+      console.warn("[TTS] Edge TTS notice:", e?.message);
       return null;
     }
-    const tts = new MsEdgeTTS();
-    const voice = edgeTTSVoice(language);
-    // PCM WAV output keeps the same /api/tts contract as the old Sarvam path.
-    await tts.setMetadata(voice, "riff-24khz-16bit-mono-pcm");
-
-    const clean = sanitizeSpeechText(text).slice(0, 900);
-    if (!clean) return null;
-
-    const result: any = tts.synthesize(clean, { rate: 0, pitch: 0, volume: 0 });
-    const stream = result?.audio;
-    if (!stream) return null;
-
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    }
-    try { if (typeof (tts as any).close === "function") await (tts as any).close(); } catch {}
-
-    if (chunks.length === 0) return null;
-    return { audioBase64: Buffer.concat(chunks).toString("base64"), voice };
-  } catch (e: any) {
-    console.warn("[TTS] Edge TTS notice:", e?.message);
-    return null;
-  }
+  });
 }
 
 // High-fidelity neural TTS via Sarvam AI: natural, human-sounding Indian voices
@@ -1743,7 +1767,7 @@ app.post("/api/tts", async (req, res) => {
     if (providerMode !== "sarvam") {
       const edge = await edgeTextToSpeech(cleanText, langLabel);
       if (edge) {
-        return res.json({ audioBase64: edge.audioBase64, format: "wav", provider: "edge", voice: edge.voice });
+        return res.json({ audioBase64: edge.audioBase64, format: edge.format || "mp3", provider: "edge", voice: edge.voice });
       }
     }
 
