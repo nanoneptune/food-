@@ -62,7 +62,10 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const transcriptRef = useRef<string>('');
-  const sessionPrefixRef = useRef<string>('');
+  // Accumulated FINALIZED text for the current listening round (persists across Chrome
+  // recognition auto-restarts). final + live interim = what the user actually said.
+  const finalTranscriptRef = useRef<string>('');
+  const interimTranscriptRef = useRef<string>('');
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const silenceTimerRef = useRef<any>(null);
   const isListeningRef = useRef<boolean>(false);
@@ -83,6 +86,26 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     isSpeakingRef.current = val;
     setIsSpeaking(val);
     if (!val) setPlayingMsgId(null);
+  };
+
+  // Chrome re-delivers the last finalized segment every time a continuous recognition
+  // session auto-ends and is restarted ("restart echo"), which makes a single word appear
+  // many times. This merges an incoming chunk into the accumulated transcript while
+  // removing any leading words that are already the trailing words of the base text.
+  const appendUniqueTail = (base: string, incoming: string): string => {
+    const baseWords = base.trim().split(/\s+/).filter(Boolean);
+    const inWords = incoming.trim().split(/\s+/).filter(Boolean);
+    if (inWords.length === 0) return base.trim();
+    let overlap = 0;
+    const maxOverlap = Math.min(baseWords.length, inWords.length);
+    for (let len = maxOverlap; len >= 1; len--) {
+      if (baseWords.slice(-len).join(' ') === inWords.slice(0, len).join(' ')) {
+        overlap = len;
+        break;
+      }
+    }
+    if (overlap >= inWords.length) return base.trim();
+    return (baseWords.join(' ') + ' ' + inWords.slice(overlap).join(' ')).trim();
   };
 
   const stopSpeaking = () => {
@@ -322,26 +345,32 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         };
 
         recognition.onresult = (event: any) => {
-          let finalTranscript = '';
-          let interimTranscript = '';
-          
-          for (let i = 0; i < event.results.length; ++i) {
-            if (event.results[i].isFinal) {
-              finalTranscript += event.results[i][0].transcript;
+          // Ignore stray results that arrive after we already stopped listening
+          if (!isListeningRef.current) return;
+
+          let interimText = '';
+          // Only process results that are NEW since the last event (event.resultIndex onwards).
+          // Scanning the whole list from index 0 re-adds already-finalized text on every event,
+          // and Chrome re-delivers the previous segment when continuous recognition restarts —
+          // both make every word appear multiple times.
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            const result = event.results[i];
+            const piece = result && result[0] ? (result[0].transcript || '') : '';
+            if (result.isFinal) {
+              // Append once, dropping any "restart echo" that overlaps the accumulated tail
+              finalTranscriptRef.current = appendUniqueTail(finalTranscriptRef.current, piece);
             } else {
-              interimTranscript += event.results[i][0].transcript;
+              interimText += piece;
             }
           }
+          interimTranscriptRef.current = interimText;
 
-          const fullText = (finalTranscript + interimTranscript);
-          
-          // Deduplicate consecutive repeated words across languages
-          const cleanText = (sessionPrefixRef.current + " " + fullText)
-            .replace(/\b(\w+)(?:\s+\1\b)+/gi, '$1')
-            .replace(/([\u0900-\u0D7F]+)(?:\s+\1)+/gu, '$1')
-            .trim();
+          // Visible transcript = finalized text + live interim, echo-free.
+          // Only react when the text actually CHANGED — pure restart echoes produce the
+          // same string and must not re-arm the silence timer forever.
+          const cleanText = appendUniqueTail(finalTranscriptRef.current, interimTranscriptRef.current);
 
-          if (cleanText) {
+          if (cleanText && cleanText !== transcriptRef.current) {
             transcriptRef.current = cleanText;
             setTranscript(cleanText);
             hasSpokenRef.current = true;
@@ -352,7 +381,9 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               stopSpeaking();
             }
 
-            // Silence Detection: After 2.0s of silence after speech, auto send!
+            // Silence Detection: auto-send after 4s of silence following real speech.
+            // The timer only fires when the user has actually stopped talking, so natural
+            // mid-sentence pauses no longer send a half-heard question.
             if (silenceTimerRef.current) {
               clearTimeout(silenceTimerRef.current);
             }
@@ -360,7 +391,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               if (isListeningRef.current && transcriptRef.current.trim()) {
                 stopListeningAndSend();
               }
-            }, 3500);
+            }, 4000);
           }
         };
 
@@ -371,15 +402,22 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           }
         };
 
-        recognition.onend = async () => {
+        recognition.onend = () => {
           if (isListeningRef.current) {
             // Chrome abruptly ends recognition when it detects a long pause or no speech.
-            // DO NOT automatically send just because onend fired; instead, accumulate and restart.
-            // Auto-send ONLY occurs if the 3500ms silenceTimer fires.
-            const capturedText = transcriptRef.current?.trim();
-            if (capturedText) {
-              sessionPrefixRef.current = capturedText + " ";
+            // Flush the trailing interim words into the final transcript so the END of the
+            // user's sentence is never lost, then restart recognition to keep listening.
+            // Auto-send still happens only when the silence timer fires.
+            const pendingTail = interimTranscriptRef.current.trim();
+            if (pendingTail && !isHallucinatedText(pendingTail)) {
+              finalTranscriptRef.current = appendUniqueTail(finalTranscriptRef.current, pendingTail);
+              const shownText = finalTranscriptRef.current;
+              if (shownText) {
+                transcriptRef.current = shownText;
+                setTranscript(shownText);
+              }
             }
+            interimTranscriptRef.current = '';
             try {
               recognition.start();
             } catch {}
@@ -558,7 +596,6 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
-    sessionPrefixRef.current = '';
     if (vadIntervalRef.current) {
       clearInterval(vadIntervalRef.current);
       vadIntervalRef.current = null;
@@ -579,6 +616,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     if (browserCaptured && !isHallucinatedText(browserCaptured)) {
       setTranscript(browserCaptured);
       transcriptRef.current = '';
+      finalTranscriptRef.current = '';
+      interimTranscriptRef.current = '';
       handleSendMessage(browserCaptured);
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         stopAndTranscribeAudio().catch(() => {});
@@ -595,14 +634,20 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       if (serverText && serverText.trim() && !isHallucinatedText(serverText.trim())) {
         setTranscript(serverText.trim());
         transcriptRef.current = '';
+        finalTranscriptRef.current = '';
+        interimTranscriptRef.current = '';
         handleSendMessage(serverText.trim());
       } else {
         setTranscript('');
         transcriptRef.current = '';
+        finalTranscriptRef.current = '';
+        interimTranscriptRef.current = '';
       }
     } else {
       setTranscript('');
       transcriptRef.current = '';
+      finalTranscriptRef.current = '';
+      interimTranscriptRef.current = '';
     }
   };
 
@@ -614,7 +659,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
     setTranscript('');
     transcriptRef.current = '';
-    sessionPrefixRef.current = '';
+    finalTranscriptRef.current = '';
+    interimTranscriptRef.current = '';
     updateListeningState(true);
     
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;

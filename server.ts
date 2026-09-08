@@ -4,9 +4,6 @@ import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
 import { createClient } from "@libsql/client";
 import Tesseract from "tesseract.js";
-import { createOpenAI } from "@ai-sdk/openai";
-import { createGroq } from "@ai-sdk/groq";
-import { generateText } from "ai";
 import twilio from "twilio";
 import dotenv from "dotenv";
 import ffmpeg from "fluent-ffmpeg";
@@ -96,12 +93,14 @@ async function runLLMGeneration({
     }
   }
 
-  // 1. Primary Option: Groq Fast LLM Inference (llama3-70b-8192 / mixtral-8x7b-32768)
+  // 1. Primary Option: Groq Fast LLM Inference. "openai/gpt-oss-120b" is the user-selected
+  //    working model; the rest are fallbacks if a model becomes unavailable.
   const groqKey = process.env.GROQ_API_KEY;
   const groqModels = [
-    "llama3-70b-8192",
-    "llama3-8b-8192",
-    "mixtral-8x7b-32768",
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+    "openai/gpt-oss-20b",
   ];
 
   if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
@@ -116,9 +115,11 @@ async function runLLMGeneration({
           body: JSON.stringify({
             model: model,
             messages: formattedMessages,
-            max_tokens: 600,
+            // Generous budget: gpt-oss models spend tokens on internal reasoning
+            // before producing the answer, so a small max_tokens yields empty content.
+            max_tokens: 4096,
           }),
-        }, 8000);
+        }, 30000);
 
         if (groqRes.ok) {
           const data: any = await groqRes.json();
@@ -126,6 +127,10 @@ async function runLLMGeneration({
           if (reply && reply.trim()) {
             return reply.trim();
           }
+          // HTTP 200 but no content (e.g. budget fully consumed by reasoning) — try next model
+          console.warn(`Groq model "${model}" returned an empty response (finish_reason: ${data?.choices?.[0]?.finish_reason || "unknown"}); trying next model...`);
+        } else {
+          console.warn(`Groq model "${model}" unavailable (HTTP ${groqRes.status}); trying next model...`);
         }
       } catch (e: any) {
         console.warn(`Groq API fallback notice for ${model}:`, e?.message);
@@ -1161,7 +1166,7 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
     }
 
     const { language } = req.body;
-    const groqKey = process.env.GROQ_API_KEY || "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";
+    const groqKey = process.env.GROQ_API_KEY;
 
     if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
       try {
