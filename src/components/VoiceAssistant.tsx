@@ -57,8 +57,6 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   
   const recognitionRef = useRef<any>(null);
   const synthRef = useRef<SpeechSynthesis | null>(typeof window !== 'undefined' ? window.speechSynthesis : null);
-  const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
-  const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const transcriptRef = useRef<string>('');
@@ -129,27 +127,15 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         synthRef.current.cancel();
       } catch {}
     }
-    activeUtteranceRef.current = null;
     setPlayingMsgId(null);
     updateSpeakingState(false);
   };
 
-  // Initialize and load browser speech synthesis voices (e.g. Google Kannada, Google Hindi, Google English)
+  // Keep a reference to the browser speech synthesis object purely so it can
+  // be CANCELED (no browser voice is ever used for speaking — see speak()).
   useEffect(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       synthRef.current = window.speechSynthesis;
-      const updateVoices = () => {
-        try {
-          const list = window.speechSynthesis.getVoices();
-          if (list && list.length > 0) {
-            voicesRef.current = list;
-          }
-        } catch (e) {
-          console.warn("Could not load speech synthesis voices", e);
-        }
-      };
-      updateVoices();
-      window.speechSynthesis.onvoiceschanged = updateVoices;
     }
   }, []);
 
@@ -478,92 +464,6 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
   }, [language]);
 
-  // Primary 1st Priority TTS: Browser built-in Google Speech Synthesis (Instant, Fast, Zero latency)
-  const speakWithBrowserGoogle = (text: string, lang: string): boolean => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return false;
-    try {
-      window.speechSynthesis.cancel();
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-      }
-
-      const cleanedForSpeech = stripEmojis(text);
-
-      if (!cleanedForSpeech) return false;
-
-      const utterance = new SpeechSynthesisUtterance(cleanedForSpeech);
-
-      let targetLangCode = 'en-IN';
-      let langPrefix = 'en';
-      if (lang === 'Kannada') {
-        targetLangCode = 'kn-IN';
-        langPrefix = 'kn';
-      } else if (lang === 'Hindi') {
-        targetLangCode = 'hi-IN';
-        langPrefix = 'hi';
-      }
-
-      utterance.lang = targetLangCode;
-      utterance.rate = 1.05; // Natural human speaking pace (not robotic fast)
-      utterance.pitch = 1.0;
-
-      // Find best available voice on the device (prioritize Google keyboard / Android / native voice)
-      const availableVoices = voicesRef.current.length > 0 
-        ? voicesRef.current 
-        : (window.speechSynthesis ? window.speechSynthesis.getVoices() : []);
-
-      const lowerPrefix = langPrefix.toLowerCase();
-      
-      // 1. Google voice specifically for language (e.g. Google ಕನ್ನಡ, Google हिन्दी, Google English)
-      let matchedVoice = availableVoices.find(v => {
-        const vLang = v.lang.toLowerCase().replace('_', '-');
-        const vName = v.name.toLowerCase();
-        return (vLang.startsWith(lowerPrefix) || vName.includes(lang.toLowerCase())) && 
-               (vName.includes('google') || vName.includes('natural'));
-      });
-
-      // 2. Any voice matching language prefix (kn, hi, en)
-      if (!matchedVoice) {
-        matchedVoice = availableVoices.find(v => {
-          const vLang = v.lang.toLowerCase().replace('_', '-');
-          const vName = v.name.toLowerCase();
-          return vLang.startsWith(lowerPrefix) || vName.includes(lang.toLowerCase());
-        });
-      }
-
-      // If user selected Kannada or Hindi, but this browser has zero matching TTS voices installed:
-      // Return false so we can smoothly fall back to server/audioUrl TTS without silence or error!
-      if ((lang === 'Kannada' || lang === 'Hindi') && !matchedVoice) {
-        return false;
-      }
-
-      if (matchedVoice) {
-        utterance.voice = matchedVoice;
-      }
-
-      activeUtteranceRef.current = utterance;
-
-      utterance.onstart = () => updateSpeakingState(true);
-      utterance.onend = () => {
-        activeUtteranceRef.current = null;
-        updateSpeakingState(false);
-        setPlayingMsgId(null);
-      };
-      utterance.onerror = (e) => {
-        console.warn("Browser speech synthesis error:", e);
-        activeUtteranceRef.current = null;
-        updateSpeakingState(false);
-        setPlayingMsgId(null);
-      };
-
-      window.speechSynthesis.speak(utterance);
-      return true;
-    } catch (e) {
-      console.warn("Browser speech synthesis notice:", e);
-      return false;
-    }
-  };
-
   const speak = async (text: string, audioUrl?: string, messageId?: string, speakLang?: string) => {
     if (!text) return;
 
@@ -583,13 +483,9 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     // current UI language — never force Kannada text through an English voice.
     const effectiveLang = (speakLang || language) as 'English' | 'Hindi' | 'Kannada';
 
-    // 1ST PRIORITY: Browser Google Speech Synthesis (Instant, Fast, 0ms network latency!)
-    const browserSpoke = speakWithBrowserGoogle(textToSpeak, effectiveLang);
-    if (browserSpoke) {
-      return;
-    }
-
-    // 2ND PRIORITY: Pre-generated audio URL (if device lacks native Kannada voice)
+    // Voice output = SERVER neural TTS only (/api/tts, Sarvam). The browser's
+    // built-in speechSynthesis voice is deliberately NOT used for speaking.
+    // 1ST PRIORITY: Pre-generated audio URL (fast playback)
     if (audioUrl) {
       try {
         const audio = new Audio(audioUrl);
@@ -638,7 +534,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         }
       }
     } catch (err) {
-      console.warn("Server TTS request notice (using browser speech fallback):", err);
+      console.warn("Server TTS request notice:", err);
     }
   };
 

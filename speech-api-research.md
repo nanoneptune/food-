@@ -1,64 +1,43 @@
-# Free Speech (STT) API Research — Kannada / Hindi / English
+# Free Speech API Research & Final Decision — Kannada / Hindi / English
 
-**Research date:** 2026-09-08 · **Scope:** which speech-to-text engines are truly free (100% no cost, no key, no rate limit) for Kannada + Hindi + English, and what is actually usable inside this Node.js/Express app.
+**Research date:** 2026-09-08 · **Scope:** which speech engines are truly free for Kannada + Hindi + English, and the final choice for this app.
 
-## TL;DR
+## TL;DR (final decision, per user preference)
 
-- The exact model id from the proposed snippet — `ai4bharat/indicconformer_stt_kn_hybrid` — **does not exist on Hugging Face**. Verified via the HF API (no such repo).
-- What AI4Bharat actually publishes for Kannada IndicConformer is `ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large`: a **1.57 GB NVIDIA-NeMo `.nemo` checkpoint**, **gated** (HF login required to download), license MIT. It is **not** a `transformers.AutoModelForCTC` model, cannot run in Node/browser, and needs a Python + NeMo + (ideally GPU) service. The snippet would not work even in Python as written.
-- The newer `ai4bharat/indic-conformer-600m-multilingual` (ONNX) is also **gated/restricted** (README and files return "access restricted") and uses custom code, so it is not "100% free & unrestricted" either.
-- The best **fully free, unrestricted, runs-today** engine for Kannada + Hindi + English inside this app is **OpenAI Whisper multilingual open weights (Apache-2.0) exported to ONNX**, run locally/in-process via Transformers.js — no API key, no rate limits, audio never leaves the server.
+- **Speech-to-text (listening) = browser's built-in Web Speech API only.** It is free, installed in Chrome/Android, and most accurate in this app for all three languages (Kannada, Hindi, English). No server/cloud STT is used while the browser recognizer is available. The server `/api/stt` route remains solely as a last-resort fallback for browsers that do not support the Web Speech API at all (e.g. some desktop Firefox builds).
+- **Text-to-speech (speaking) = server neural TTS only, via `/api/tts`.** The browser's built-in `speechSynthesis` voice is deliberately disabled for speaking — it is only referenced to be *cancelled*. The **default provider is Microsoft Edge "Read Aloud" neural voices** (`msedge-tts`, MIT, no API key, no credits, fast): Kannada `kn-IN-Sapna/Gagan`, Hindi `hi-IN-Swara/Madhur`, English `en-IN-Neerja/Prabhat`. Sarvam AI is only used as an optional fallback if `SARVAM_API_KEY` is set and the free provider fails.
 
-## Verified findings (with sources)
+## Research findings
 
-| Source / repo | What it is | Free? | Runs in this app? |
+### 1. The proposed IndicConformer model does not exist as written
+
+- `ai4bharat/indicconformer_stt_kn_hybrid` — **not found on Hugging Face** (verified via the HF API).
+- What AI4Bharat actually publishes for Kannada IndicConformer: `ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large` — a **1.57 GB NVIDIA-NeMo `.nemo` checkpoint**, **gated** (HF login required), MIT license. It is **not** a `transformers.AutoModelForCTC` model and cannot run in Node/browser — it needs a Python + NeMo (+ GPU) service.
+- The newer `ai4bharat/indic-conformer-600m-multilingual` (ONNX) is also **gated/restricted** and uses custom code — not "100% free & unrestricted".
+- Conclusion: no IndicConformer variant runs inside this Node.js/Express app today. Any future adoption requires a separate Python + NeMo + GPU service.
+
+### 2. Free speech-to-text options compared
+
+| Option | Free? | Runs in this app? | Notes |
 | --- | --- | --- | --- |
-| `ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large` (HF) | Kannada IndicConformer, NeMo `.nemo`, 1.57 GB, `gated: auto`, MIT | Requires HF login | No (NeMo/PyTorch, GPU-oriented) |
-| `ai4bharat/indicconformer_stt_hi_hybrid_ctc_rnnt_large` (HF) | Hindi IndicConformer, same NeMo pattern | Requires HF login | No |
-| `ai4bharat/indic-conformer-600m-multilingual` (HF) | ONNX multilingual IndicConformer | **Restricted/gated** (access denied on README/files) | No (custom code + gated weights) |
-| `ai4bharat/IndicConformer` (HF) | NeMo `.nemo`, `cc-by-4.0` | **Gated** (Space shows 401) | No |
-| [models.ai4bharat.org](https://models.ai4bharat.org/) | AI4Bharat model catalog (IndicConformer described as 30M-param real-time ASR) | Free | Checkpoints are NeMo — needs Python service |
-| `Xenova/whisper-small`, `Xenova/whisper-base` (HF) | OpenAI Whisper multilingual, ONNX, Apache-2.0, `gated: false` | **100% free** | **Yes — in-process via `@xenova/transformers` (already a dependency)** |
-| Groq hosted Whisper (`whisper-large-v3-turbo`) | Cloud Whisper API | Free tier, but key + rate limits | Yes (already tier 1 in `/api/stt`) |
-| Browser Web Speech API | Chrome/Edge/Android built-in recognizer | 100% free | Yes (client side, already used) |
-| Bhashini (govt. of India) | STT/TTS for Indian languages incl. Kannada/Hindi/English | Free program access | Requires registration/API key + auth flow; not "unrestricted" |
-| Sarvam AI / AssemblyAI / Google / Azure STT | Commercial cloud STT | Trials/paid | Paid beyond trials |
+| **Browser Web Speech API** | 100% free | **Yes (chosen)** | Built into Chrome/Edge/Android; supports kn-IN/hi-IN/en-IN; no key; audio stays on device |
+| Groq hosted Whisper (`whisper-large-v3-turbo`) | Free tier | Server fallback only | Requires `GROQ_API_KEY`; rate-limited |
+| OpenAI Whisper open weights (ONNX via Transformers.js) | Free/Apache-2.0 | Possible but heavy/slow on CPU; poor fit vs browser API | Rejected for STT |
+| Bhashini (Govt. of India) STT | Program/free | Needs registration + API key | Not "unrestricted" |
+| Sarvam / AssemblyAI / Google / Azure STT | Trials/paid | Paid | Rejected |
 
-## Why Whisper (offline) wins for this project today
+### 3. Text-to-speech decision
 
-1. **Apache-2.0 weights, un-gated** — genuinely 100% free and unrestricted (verified `gated: false`, `license:apache-2.0`).
-2. **No API key, no quotas** — keeps working after free-tier limits of Groq/Sarvam.
-3. **Privacy** — audio stays on the server.
-4. **One model covers all three languages** — Whisper multilingual natively supports Kannada, Hindi and English (auto-detect or forced).
-5. **Fits the current stack** — `@xenova/transformers` + ONNX runtime is already in `package.json` and used client-side; the same library runs in Node.
-6. **Zero deployment change risk** — skipped automatically on Vercel (`VERCEL=1`) where serverless function size limits make local models impractical.
+- **Server neural TTS (`/api/tts` → Microsoft Edge neural voices via `msedge-tts`)** — natural, fast, 100% free (no token/credits) for Kannada/Hindi/English; used for all speaking. Optional fallback: Sarvam AI when `SARVAM_API_KEY` is set.
+- Browser `speechSynthesis` is only cancelled (never used to speak).
+- Optional: pre-generated audio URLs are played first when provided (fast playback), then server TTS.
 
-Caveat: the model downloads on first use (~hundreds of MB for quantized `whisper-small`), cached under `.cache/transformers`; transcription on CPU is slower than Groq's GPU cloud (~seconds per utterance). For real-time phone IVR latency, keep the Groq key configured (tier 1); the offline tier is the guaranteed free fallback.
+## What changed in code
 
-## What was implemented
+- `server.ts`: removed the experimental offline-Whisper STT tier (added then reverted). `/api/stt` remains the emergency fallback (Groq when configured) for browsers without the Web Speech API; it still returns `detectedLanguage`.
+- `server.ts` `/api/tts`: new default provider `edgeTextToSpeech()` via the MIT-licensed `msedge-tts` npm package (Microsoft Edge Read Aloud voices, PCM WAV output, no key). Voice map: Kannada `kn-IN-SapnaNeural` (env `TTS_EDGE_VOICE_KN`), Hindi `hi-IN-SwaraNeural` (env `TTS_EDGE_VOICE_HI`), English `en-IN-NeerjaNeural` (env `TTS_EDGE_VOICE_EN`). Sarvam runs only when `TTS_PROVIDER=sarvam` or as fallback with a key. Dependency added to `package.json` (`msedge-tts ^2.0.7`) — run `npm install`.
+- `src/components/VoiceAssistant.tsx` & `src/components/IVRDialer.tsx`:
+  - Listening still uses the browser recognizer (primary) — unchanged.
+  - Speaking goes: pre-generated `audioUrl` (if any) → server `/api/tts` (Edge neural, free). All `speechSynthesis.speak()` calls and browser-voice code removed; the synthesis object is kept only for `cancel()` cleanup.
 
-In `server.ts`, `/api/stt` is now a three-tier engine:
-
-1. **Tier 1 — Groq Whisper** (`whisper-large-v3-turbo`) when `GROQ_API_KEY` is set (cloud, fast). Forced-language only when the caller explicitly chose Kannada/Hindi; otherwise auto-detect.
-2. **Tier 2 — Offline multilingual Whisper** (`Xenova/whisper-small`, Apache-2.0) — new. Runs locally with no key; covers Kannada/Hindi/English; used whenever Groq is absent or fails.
-3. Client-side browser Web Speech API + Transformers.js fallback remain for browsers without server access.
-
-Both server tiers return `detectedLanguage` so chat/IVR reply in the user's actual language.
-
-## Configuration
-
-| Env var | Default | Meaning |
-| --- | --- | --- |
-| `STT_OFFLINE` | `1` (outside Vercel) | `0` disables the offline tier |
-| `STT_OFFLINE_MODEL` | `Xenova/whisper-small` | e.g. `Xenova/whisper-base` (smaller/faster) or `Xenova/whisper-medium` (more accurate, heavier) |
-| `GROQ_API_KEY` | – | Kept for tier-1 cloud speed |
-
-## Future: real IndicConformer (Kannada-specialized) upgrade path
-
-If you want the best Kannada accuracy later, deploy the real AI4Bharat IndicConformer as a **separate Python + NeMo service** (it cannot live in this Node/Vercel app):
-
-1. Accept the gated repo: `ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large` (HF login → accept terms).
-2. Run on a GPU box: `pip install nemo_toolkit[asr]`, load via `nemo.collections.asr.models.EncDecRNNTBPEModel.from_pretrained(...)` (NeMo API, not `AutoModelForCTC`).
-3. Expose an HTTP endpoint and point `/api/stt` at it (e.g. `STT_INDIC_URL`) as tier 0 for Kannada, falling back to the tiers above.
-
-Sources: [HF API model list (ai4bharat IndicConformer)](https://huggingface.co/api/models?author=ai4bharat&search=indicconformer) · [HF Kannada IndicConformer repo](https://huggingface.co/ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large) · [HF multilingual ONNX IndicConformer (restricted)](https://huggingface.co/ai4bharat/indic-conformer-600m-multilingual) · [HF Indic ASR Space](https://huggingface.co/spaces/ai4bharat/indic-conformer) · [Xenova/whisper-small (Apache-2.0, ONNX)](https://huggingface.co/Xenova/whisper-small) · [models.ai4bharat.org](https://models.ai4bharat.org/)
+Sources: [HF API model list (ai4bharat IndicConformer)](https://huggingface.co/api/models?author=ai4bharat&search=indicconformer) · [HF Kannada IndicConformer repo](https://huggingface.co/ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large) · [HF multilingual ONNX IndicConformer (restricted)](https://huggingface.co/ai4bharat/indic-conformer-600m-multilingual) · [Xenova/whisper-small (Apache-2.0, ONNX)](https://huggingface.co/Xenova/whisper-small) · [models.ai4bharat.org](https://models.ai4bharat.org/)

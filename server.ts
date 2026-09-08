@@ -1041,6 +1041,59 @@ function sarvamLangCode(language: string): string {
   return 'en-IN';
 }
 
+// ---------------------------------------------------------------------------
+// FREE & FAST TTS (no API key, no credits): Microsoft Edge "Read Aloud" neural
+// voices served through the MIT-licensed `msedge-tts` npm package. Includes
+// natural Kannada (kn-IN-SapnaNeural/GaganNeural), Hindi (hi-IN-SwaraNeural/
+// MadhurNeural) and Indian English (en-IN-NeerjaNeural/PrabhatNeural) voices,
+// with low latency. This is the DEFAULT provider so the app speaks even with
+// zero Sarvam credits. Sarvam AI stays as an optional fallback.
+// ---------------------------------------------------------------------------
+function edgeTTSVoice(language: string): string {
+  const l = String(language || '').toLowerCase();
+  if (l.includes('kn') || l.includes('kannada')) return process.env.TTS_EDGE_VOICE_KN || "kn-IN-SapnaNeural";
+  if (l.includes('hi') || l.includes('hindi')) return process.env.TTS_EDGE_VOICE_HI || "hi-IN-SwaraNeural";
+  return process.env.TTS_EDGE_VOICE_EN || "en-IN-NeerjaNeural";
+}
+
+async function edgeTextToSpeech(text: string, language: string): Promise<{ audioBase64: string; voice: string } | null> {
+  try {
+    // Non-literal specifier so tsc does not hard-require the package to be
+    // installed at type-check time (it is declared in package.json and loaded
+    // lazily at runtime; run `npm install` before first use).
+    const edgePkg = "msedge-tts";
+    const mod: any = await import(edgePkg);
+    const MsEdgeTTS = mod.MsEdgeTTS || mod.default;
+    if (!MsEdgeTTS) {
+      console.warn("[TTS] msedge-tts package not available.");
+      return null;
+    }
+    const tts = new MsEdgeTTS();
+    const voice = edgeTTSVoice(language);
+    // PCM WAV output keeps the same /api/tts contract as the old Sarvam path.
+    await tts.setMetadata(voice, "riff-24khz-16bit-mono-pcm");
+
+    const clean = sanitizeSpeechText(text).slice(0, 900);
+    if (!clean) return null;
+
+    const result: any = tts.synthesize(clean, { rate: 0, pitch: 0, volume: 0 });
+    const stream = result?.audio;
+    if (!stream) return null;
+
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    try { if (typeof (tts as any).close === "function") await (tts as any).close(); } catch {}
+
+    if (chunks.length === 0) return null;
+    return { audioBase64: Buffer.concat(chunks).toString("base64"), voice };
+  } catch (e: any) {
+    console.warn("[TTS] Edge TTS notice:", e?.message);
+    return null;
+  }
+}
+
 // High-fidelity neural TTS via Sarvam AI: natural, human-sounding Indian voices
 // for English, Hindi and Kannada. Returns base64 WAV audio or null on failure.
 async function sarvamTextToSpeech(text: string, language: string): Promise<string | null> {
@@ -1672,20 +1725,35 @@ Respond with ONLY valid JSON (no markdown code fences, no extra text):
   }
 });
 
-// API: High-fidelity neural Text-to-Speech (Sarvam AI) - natural voices for
-// English, Hindi, and Kannada. The client falls back to this only when the
-// device has no matching native voice (e.g. Kannada/Hindi on desktop browsers).
+// API: Server Text-to-Speech — default FREE provider is Microsoft Edge neural
+// voices via `msedge-tts` (no API key/credits, fast, Kannada/Hindi/English).
+// Optional paid provider: Sarvam AI, used only when TTS_PROVIDER=sarvam or
+// when the Edge provider fails and a Sarvam key is configured.
 app.post("/api/tts", async (req, res) => {
   const { text, language } = req.body;
   if (!text || !text.trim()) {
     return res.status(400).json({ error: "text is required" });
   }
   try {
-    const audioBase64 = await sarvamTextToSpeech(String(text), String(language || "English"));
-    if (audioBase64) {
-      return res.json({ audioBase64, format: "wav", provider: "sarvam" });
+    const cleanText = String(text).trim();
+    const langLabel = String(language || "English");
+    const providerMode = String(process.env.TTS_PROVIDER || "edge").toLowerCase();
+
+    // 1. DEFAULT: free Microsoft Edge neural TTS (no token, no credits).
+    if (providerMode !== "sarvam") {
+      const edge = await edgeTextToSpeech(cleanText, langLabel);
+      if (edge) {
+        return res.json({ audioBase64: edge.audioBase64, format: "wav", provider: "edge", voice: edge.voice });
+      }
     }
-    res.status(501).json({ error: "TTS unavailable. Falling back to browser Speech Synthesis." });
+
+    // 2. OPTIONAL: Sarvam AI (paid / credits) as fallback when configured.
+    const sarvamBase64 = await sarvamTextToSpeech(cleanText, langLabel);
+    if (sarvamBase64) {
+      return res.json({ audioBase64: sarvamBase64, format: "wav", provider: "sarvam" });
+    }
+
+    res.status(501).json({ error: "TTS unavailable right now. Please try again." });
   } catch (err: any) {
     console.error("TTS endpoint error:", err);
     res.status(500).json({ error: err.message || "TTS failed" });
@@ -1723,120 +1791,6 @@ function isHallucinatedTranscript(text: string): boolean {
     "shokran"
   ];
   return hallucinations.includes(clean);
-}
-
-// ---------------------------------------------------------------------------
-// 100% FREE & UNRESTRICTED offline STT tier (no API key, no rate limits, no
-// audio sent to any third party). Uses OpenAI Whisper multilingual open weights
-// (Apache-2.0) exported to ONNX and runs in-process via Transformers.js on the
-// Node server. Covers Kannada, Hindi and English. Skipped on Vercel serverless
-// (too heavy) and can be disabled with STT_OFFLINE=0.
-//
-// NOTE ON INDICCONFORMER (why it is not used here): AI4Bharat's Kannada ASR is
-// published as `ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large` — NOT the
-// `ai4bharat/indicconformer_stt_kn_hybrid` id quoted in many snippets. It is a
-// 1.57 GB NVIDIA-NeMo .nemo checkpoint, requires HF login ("gated" repo) and a
-// Python + NeMo + GPU environment. It is not a transformers AutoModelForCTC
-// model and cannot run inside this Node.js/Express/Vercel app, so the code
-// below uses the best fully-free engine that actually runs here today.
-// ---------------------------------------------------------------------------
-let offlineWhisperPromise: Promise<any> | null = null;
-
-async function getOfflineWhisper(): Promise<any> {
-  if (!offlineWhisperPromise) {
-    const tf: any = await import("@xenova/transformers");
-    tf.env.allowLocalModels = false;
-    try {
-      const path = await import("path");
-      tf.env.cacheDir = path.join(process.cwd(), ".cache", "transformers");
-    } catch {}
-    const modelId = process.env.STT_OFFLINE_MODEL || "Xenova/whisper-small"; // multilingual, Apache-2.0
-    offlineWhisperPromise = tf.pipeline("automatic-speech-recognition", modelId, { quantized: true });
-    // Allow a failed download/load to be retried on the next request.
-    offlineWhisperPromise.catch(() => { offlineWhisperPromise = null; });
-  }
-  return offlineWhisperPromise;
-}
-
-// Decode a PCM WAV Buffer (16 kHz mono, produced by convertWebmToWav) into the
-// Float32Array samples Whisper expects. Returns null on any format issue.
-function decodeWavToFloat32(buf: Buffer): Float32Array | null {
-  try {
-    if (!buf || buf.length < 44) return null;
-    if (buf.toString("ascii", 0, 4) !== "RIFF" || buf.toString("ascii", 8, 12) !== "WAVE") return null;
-    let offset = 12;
-    let fmt: any = null;
-    let dataOffset = -1;
-    let dataLen = 0;
-    while (offset + 8 <= buf.length) {
-      const id = buf.toString("ascii", offset, offset + 4);
-      const size = buf.readUInt32LE(offset + 4);
-      if (id === "fmt ") {
-        fmt = {
-          audioFormat: buf.readUInt16LE(offset + 8),
-          numChannels: buf.readUInt16LE(offset + 10),
-          sampleRate: buf.readUInt32LE(offset + 12),
-          bitsPerSample: buf.readUInt16LE(offset + 22),
-        };
-      } else if (id === "data") {
-        dataOffset = offset + 8;
-        dataLen = size;
-        break;
-      }
-      offset += 8 + size + (size % 2);
-    }
-    if (!fmt || dataOffset < 0 || fmt.numChannels === 0 || fmt.bitsPerSample !== 16) return null;
-    const channels = fmt.numChannels;
-    const bytesPerSample = fmt.bitsPerSample / 8;
-    const frameBytes = channels * bytesPerSample;
-    const frames = Math.floor(dataLen / frameBytes);
-    const out = new Float32Array(frames);
-    for (let f = 0; f < frames; f++) {
-      const base = dataOffset + f * frameBytes;
-      let sum = 0;
-      for (let c = 0; c < channels; c++) {
-        sum += buf.readInt16LE(base + c * bytesPerSample);
-      }
-      out[f] = (sum / channels) / 32768;
-    }
-    return out;
-  } catch {
-    return null;
-  }
-}
-
-async function transcribeOfflineWhisper(audioBuffer: Buffer, language: string): Promise<{ text: string; detectedLanguage: string } | null> {
-  if (process.env.VERCEL === "1" || process.env.STT_OFFLINE === "0") return null;
-  try {
-    // Whisper expects 16 kHz mono PCM WAV.
-    let wavBuf: Buffer;
-    try {
-      wavBuf = await convertWebmToWav(audioBuffer);
-    } catch {
-      return null;
-    }
-    const float32 = decodeWavToFloat32(wavBuf);
-    if (!float32 || float32.length < 1600) return null; // shorter than ~0.1s = noise
-
-    const transcriber = await getOfflineWhisper();
-    const langInput = String(language || "").toLowerCase();
-    const whisperLang =
-      langInput.includes("kannada") || langInput === "kn" || langInput === "kn-in" ? "kannada"
-        : langInput.includes("hindi") || langInput === "hi" || langInput === "hi-in" ? "hindi"
-          : langInput.includes("english") || langInput === "en" || langInput === "en-in" ? "english"
-            : undefined;
-
-    const options: any = { task: "transcribe", chunk_length_s: 30, stride_length_s: 5 };
-    if (whisperLang) options.language = whisperLang; // else auto-detect
-
-    const result: any = await transcriber(float32, options);
-    const text = typeof result === "string" ? result : (result?.text || "");
-    if (!text || !text.trim() || isHallucinatedTranscript(text.trim())) return null;
-    return { text: text.trim(), detectedLanguage: detectTextLanguage(text) };
-  } catch (e: any) {
-    console.warn("[STT] Offline Whisper tier failed:", e?.message);
-    return null;
-  }
 }
 
 // API: Robust Multi-Tier Speech-to-Text (STT) - Sarvam AI + Groq Whisper + OpenAI
@@ -1897,15 +1851,6 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
       } catch (groqWhisperErr: any) {
         console.warn("Groq Whisper STT failed:", groqWhisperErr?.message);
       }
-    }
-
-    // TIER 2 (fully free & unrestricted): local offline multilingual Whisper
-    // (Apache-2.0, no key, no rate limit) — the fallback that guarantees
-    // Kannada/Hindi/English transcription even when no cloud key is configured.
-    const offline = await transcribeOfflineWhisper(req.file.buffer, String(language || ""));
-    if (offline) {
-      console.log(`[STT Success] Offline Whisper transcribed (${offline.detectedLanguage}): "${offline.text}"`);
-      return res.json({ transcript: offline.text, detectedLanguage: offline.detectedLanguage, provider: "offline-whisper" });
     }
 
     res.status(200).json({ transcript: "", detectedLanguage: "English", error: "Could not transcribe audio. Please speak closer to the microphone and try again." });

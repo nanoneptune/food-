@@ -75,7 +75,6 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const speechSilenceTimerRef = useRef<any>(null);
   const greetingCancelRef = useRef<boolean>(false);
   const processingSpeechRef = useRef<boolean>(false);
-  const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
   // CRITICAL: the language the IVR is ACTUALLY using right now. Speech
   // recognition and TTS must read this ref (not the React state) because after
@@ -241,11 +240,11 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       audioPlayerRef.current.currentTime = 0;
     }
     if (window.speechSynthesis) {
+      // Cancel any leftover speech (no browser voice is used for speaking).
       try {
         window.speechSynthesis.cancel();
       } catch {}
     }
-    activeUtteranceRef.current = null;
     setIsIvrSpeaking(false);
   };
 
@@ -255,65 +254,8 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     stopSpeechOnly();
   };
 
-  // Google Browser Web Speech API TTS (First Priority)
-  const speakWithBrowserGoogle = (text: string, langCode: string, onEnd: () => void): boolean => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return false;
-    try {
-      window.speechSynthesis.cancel();
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
-      }
-
-      const prefix = langCode.slice(0, 2).toLowerCase();
-      const voices = window.speechSynthesis.getVoices();
-
-      // Find best available voice on the device (prioritizing Google keyboard / Android / native voice)
-      let voiceMatch = voices.find(v => {
-        const vLang = v.lang.toLowerCase().replace('_', '-');
-        const vName = v.name.toLowerCase();
-        return (vLang.startsWith(prefix) || vName.includes(prefix)) && 
-               (vName.includes('google') || vName.includes('natural'));
-      });
-
-      if (!voiceMatch) {
-        voiceMatch = voices.find(v => {
-          const vLang = v.lang.toLowerCase().replace('_', '-');
-          return vLang.startsWith(prefix);
-        });
-      }
-
-      // If user selected Kannada or Hindi, but this browser has zero matching TTS voices installed:
-      // Return false so we can smoothly fall back to server audio without silence or error!
-      if ((prefix === 'kn' || prefix === 'hi') && !voiceMatch) {
-        return false;
-      }
-
-      const utterance = new SpeechSynthesisUtterance(stripEmojis(text));
-      utterance.lang = langCode;
-      utterance.rate = 1.05; // Natural human speaking pace (not robotic fast)
-      utterance.pitch = 1.0;
-      if (voiceMatch) utterance.voice = voiceMatch;
-
-      activeUtteranceRef.current = utterance;
-      utterance.onend = () => {
-        activeUtteranceRef.current = null;
-        onEnd();
-      };
-      utterance.onerror = (e) => {
-        console.warn("SpeechSynthesis notice:", e);
-        activeUtteranceRef.current = null;
-        onEnd();
-      };
-
-      window.speechSynthesis.speak(utterance);
-      return true;
-    } catch (e) {
-      console.warn("Browser SpeechSynthesis attempt notice:", e);
-      return false;
-    }
-  };
-
-  // Play speech: 1st Priority Google Browser Web Speech, with server fallbacks
+  // Play speech: SERVER neural TTS only (/api/tts, Sarvam). The browser's
+  // built-in speechSynthesis voice is deliberately NOT used for speaking.
   const speakIVR = async (
     text: string, 
     audioUrl?: string, 
@@ -348,13 +290,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       }
     };
 
-    // 1ST PRIORITY: Google Browser Web Speech API
-    const spokeWithBrowser = speakWithBrowserGoogle(cleanPrompt, targetLang, handleSpeechEnd);
-    if (spokeWithBrowser) {
-      return;
-    }
-
-    // 2ND PRIORITY: Pre-generated / server audioUrl fallback (when device lacks native Kannada/Hindi voices)
+    // 1ST PRIORITY: Pre-generated / server audio URL (fast playback)
     if (audioUrl) {
       try {
         if (!audioPlayerRef.current) {
@@ -372,7 +308,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       }
     }
 
-    // 3RD PRIORITY: In-browser speech synthesis or high-fidelity /api/tts
+    // 2ND PRIORITY: High-fidelity server neural TTS (/api/tts, Sarvam)
     fallbackSpeech(cleanPrompt, targetLang, handleSpeechEnd);
   };
 
