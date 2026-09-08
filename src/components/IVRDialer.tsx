@@ -254,6 +254,15 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     stopSpeechOnly();
   };
 
+  // Close the caller's mic BEFORE the IVR speaks — the mic and the speaker are
+  // never active at the same moment (prevents double mic "ding" & echo).
+  const stopUserListening = () => {
+    try {
+      speechRecognitionRef.current?.abort();
+    } catch {}
+    setIsListening(false);
+  };
+
   // Play speech: SERVER neural TTS only (/api/tts, Sarvam). The browser's
   // built-in speechSynthesis voice is deliberately NOT used for speaking.
   const speakIVR = async (
@@ -263,6 +272,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     onFinish?: () => void
   ) => {
     stopSpeechOnly();
+    stopUserListening();
     clearSilenceTimers();
     const cleanPrompt = stripEmojis(text);
     if (!cleanPrompt) {

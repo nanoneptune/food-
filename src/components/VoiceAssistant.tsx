@@ -464,6 +464,51 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
   }, [language]);
 
+  // Close the microphone quietly (nothing sent, no prompt). Used so the mic
+  // and the speaker are NEVER active at the same moment — this also avoids the
+  // browser playing its mic "ding" twice from two overlapping sessions.
+  const closeMicQuietly = () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    if (vadIntervalRef.current) {
+      clearInterval(vadIntervalRef.current);
+      vadIntervalRef.current = null;
+    }
+    hasSpokenRef.current = false;
+    lastSoundTimeRef.current = 0;
+    if (isListeningRef.current) {
+      updateListeningState(false);
+    }
+    try {
+      recognitionRef.current?.stop();
+    } catch {}
+  };
+
+  // Break long replies into short speakable sentences (<= ~700 chars each) so
+  // even very long answers are actually spoken instead of failing silently.
+  const splitSpeechSegments = (rawText: string): string[] => {
+    const cleaned = stripEmojis(rawText).replace(/\s+/g, ' ').trim();
+    if (!cleaned) return [];
+    if (cleaned.length <= 700) return [cleaned];
+    const sentences = cleaned.match(/[^.!?।॥…]+[.!?।॥…]+|[^.!?।॥…]+$/g) || [];
+    const segments: string[] = [];
+    let current = '';
+    for (const sentence of sentences) {
+      const candidate = current + sentence;
+      if (candidate.length > 700 && current) {
+        segments.push(current.trim());
+        current = sentence;
+      } else {
+        current = candidate;
+      }
+    }
+    const tail = current.trim();
+    if (tail) segments.push(tail);
+    return segments.length > 0 ? segments : [cleaned.slice(0, 700)];
+  };
+
   const speak = async (text: string, audioUrl?: string, messageId?: string, speakLang?: string) => {
     if (!text) return;
 
@@ -502,8 +547,18 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       return audio.play();
     };
 
-    // 1ST PRIORITY: Pre-generated audio URL (fast playback)
-    if (audioUrl) {
+    // MIC & SPEAKER ARE NEVER OPEN TOGETHER. The assistant's voice starts
+    // only after the mic is fully closed (and vice versa in startListening).
+    // This also prevents the browser double "ding" caused by two mic sessions.
+    closeMicQuietly();
+
+    // Split long replies into short speakable pieces — a huge single request
+    // may silently fail, so big answers are spoken segment by segment.
+    const segments = splitSpeechSegments(textToSpeak);
+    if (segments.length === 0) return;
+
+    // 1ST PRIORITY: Pre-generated audio URL covers a SHORT reply.
+    if (audioUrl && segments.length === 1) {
       try {
         const audio = new Audio(audioUrl);
         await playAudioEl(audio);
@@ -513,27 +568,31 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       }
     }
 
-    // 2ND PRIORITY: Server TTS (/api/tts)
-    try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: textToSpeak, language: effectiveLang })
-      });
+    // 2ND PRIORITY: Server TTS (/api/tts), one request per segment.
+    for (let i = 0; i < segments.length; i++) {
+      // If the user tapped the mic mid-answer (barge-in), stop the rest.
+      if (i > 0 && !isSpeakingRef.current) break;
+      try {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: segments[i], language: effectiveLang })
+        });
 
-      const contentType = res.headers.get('content-type') || '';
-      if (res.ok && contentType.includes('application/json')) {
-        const data = await res.json();
-        if (data && data.audioBase64) {
-          // mp3 (Edge) or wav (Sarvam) — pick the right MIME for the provider.
-          const mime = data.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
-          const audio = new Audio(`data:${mime};base64,${data.audioBase64}`);
-          await playAudioEl(audio);
-          return;
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
+          const data = await res.json();
+          if (data && data.audioBase64) {
+            // mp3 (Edge) or wav (Sarvam) — pick the right MIME for the provider.
+            const mime = data.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+            const audio = new Audio(`data:${mime};base64,${data.audioBase64}`);
+            await playAudioEl(audio);
+          }
         }
+      } catch (err) {
+        console.warn("Server TTS request notice:", err);
+        break;
       }
-    } catch (err) {
-      console.warn("Server TTS request notice:", err);
     }
   };
 
@@ -632,6 +691,11 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
   const startListeningProcess = async () => {
     stopSpeaking();
+    // ONE mic session at a time: ignore a second start while already listening
+    // or while the assistant's voice is playing (no double "ding", no echo).
+    if (isListeningRef.current || isSpeakingRef.current || activeAudioRef.current) {
+      return;
+    }
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
