@@ -1281,10 +1281,10 @@ SPOKEN-WORD RULES (replies are read aloud by a voice assistant):
 2. COMPLAINT & GRIEVANCE REPORTING FLOW:
    - When the citizen reports a specific food safety violation, unhygienic restaurant/vendor, spoiled/contaminated food, food poisoning incident, or foreign object (insects, hair, glass, chemical odor):
      a) Express high empathy and serious concern for consumer health in plain language.
-      b) Note down the incident details: WHERE (outlet/vendor/location), WHEN (date & time), and CAUSES/VIOLATIONS (symptoms, items, contamination details).
-      c) BEFORE asking anything, scan the entire conversation history and the Citizen Profile. If WHERE, WHEN or CAUSE was already given in any earlier message, NEVER ask for it again — in particular never ask the address/location a second time. Ask at most ONE polite question, only about the single genuinely missing field.
-      d) If the citizen has already provided enough details (place + incident + cause), do NOT ask more questions — acknowledge briefly and proceed immediately.
-      e) Once details are clear (or the citizen does not know a minor detail), first write one short reassuring sentence, then generate the official Food Safety Grievance Report using the Markdown structure below, and append COMPLAINT_DRAFT_REQUEST at the end. If a field could not be obtained, write "Unknown" in the report instead of asking again.
+      b) Only MINIMAL basics are needed to proceed: WHAT happened (issue/cause) and WHERE (outlet/place — the Citizen Profile location counts if the citizen did not mention another place). WHEN and the exact food item are optional — write "Unknown" when not said. NEVER ask for order numbers, receipts, bills or extra paperwork.
+      c) BEFORE asking anything, scan the whole conversation history and the Citizen Profile. Ask at most ONE short question, and only if BOTH the issue and a place are still missing. Never repeat a question already answered, and never ask the address twice.
+      d) As soon as the minimal basics are present, do NOT ask any more questions — acknowledge briefly, generate the report, and invite the citizen to add a PHOTO (a photo of the food, packet or bill helps our team act faster) and to confirm submission.
+      e) Generate the official Food Safety Grievance Report using the Markdown structure below and append COMPLAINT_DRAFT_REQUEST at the end. Any field that could not be obtained is written as "Unknown" — never interrogate to fill it.
 
 HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
 # 📋 Official Food Safety & Inspection Grievance Report
@@ -1441,6 +1441,17 @@ app.post("/api/ivr/dialogue", async (req, res) => {
   if (audioNoteUrl) {
     updatedData.audioNoteUrl = audioNoteUrl;
   }
+  // LANGUAGE AUTO-FOLLOW BY SCRIPT: if the caller SPEAKS/WRITES Kannada or
+  // Hindi while the IVR is still in English (e.g. they talk to the menu instead
+  // of pressing a digit), switch the whole IVR to their language instantly so
+  // it never explains/answers in English.
+  if (message && !digits) {
+    const msgScript = detectTextLanguage(String(message));
+    const currentLangName = currentLang === "kn-IN" ? "Kannada" : currentLang === "hi-IN" ? "Hindi" : "English";
+    if (msgScript === "Kannada" && currentLangName !== "Kannada") currentLang = "kn-IN";
+    else if (msgScript === "Hindi" && currentLangName !== "Hindi") currentLang = "hi-IN";
+  }
+
   let isComplaintReady = false;
   let markdownReport = "";
 

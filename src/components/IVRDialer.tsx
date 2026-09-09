@@ -75,6 +75,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const speechSilenceTimerRef = useRef<any>(null);
   const greetingCancelRef = useRef<boolean>(false);
   const processingSpeechRef = useRef<boolean>(false);
+  const speechTokenRef = useRef<number>(0);
 
   // CRITICAL: the language the IVR is ACTUALLY using right now. Speech
   // recognition and TTS must read this ref (not the React state) because after
@@ -251,6 +252,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   // Interruption Handler: Stop IVR Speaking when user interrupts or hangs up
   const interruptSpeaking = () => {
     greetingCancelRef.current = true;
+    speechTokenRef.current += 1; // cancels any in-flight chunked speech
     stopSpeechOnly();
   };
 
@@ -274,6 +276,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     stopSpeechOnly();
     stopUserListening();
     clearSilenceTimers();
+    speechTokenRef.current += 1; // this is now the active speech session
     const cleanPrompt = stripEmojis(text);
     if (!cleanPrompt) {
       if (onFinish) onFinish();
@@ -323,49 +326,100 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     fallbackSpeech(cleanPrompt, targetLang, handleSpeechEnd);
   };
 
+  // CHUNK-WISE low-delay speaking: long replies are split into small pieces and
+  // the FIRST piece is spoken immediately — the IVR never waits for the whole
+  // message to be synthesized before starting to talk.
   const fallbackSpeech = async (text: string, targetLang: string, onEnd: () => void) => {
-    const cleanText = stripEmojis(text);
+    const cleanText = stripEmojis(text).replace(/\s+/g, ' ').trim();
     if (!cleanText) {
       onEnd();
       return;
     }
 
     const prefix = targetLang.slice(0, 2).toLowerCase();
+    let langName = "English";
+    if (prefix === "kn") langName = "Kannada";
+    else if (prefix === "hi") langName = "Hindi";
 
-    // High-fidelity server neural TTS (/api/tts — free Edge voices / Sarvam)
-    try {
-      let langName = "English";
-      if (prefix === "kn") langName = "Kannada";
-      else if (prefix === "hi") langName = "Hindi";
+    const myToken = speechTokenRef.current; // session id; bumped on interrupt/new speech
 
-      const res = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: cleanText, language: langName })
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.audioBase64) {
-          if (!audioPlayerRef.current) {
-            audioPlayerRef.current = new Audio();
-          }
-          // mp3 (Edge free TTS) or wav (Sarvam) — pick the correct MIME.
-          const mime = data.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
-          audioPlayerRef.current.src = `data:${mime};base64,${data.audioBase64}`;
-          try { audioPlayerRef.current.playbackRate = 1.4; } catch {} // quick 1.4x speech
-          audioPlayerRef.current.onended = () => onEnd();
-          audioPlayerRef.current.onerror = () => onEnd();
-          await audioPlayerRef.current.play();
-          return;
+    const splitSpeech = (s: string): string[] => {
+      if (s.length <= 600) return [s];
+      const sentences = s.match(/[^.!?।॥…]+[.!?।॥…]+|[^.!?।॥…]+$/g) || [];
+      const parts: string[] = [];
+      let cur = '';
+      for (const sent of sentences) {
+        const candidate = cur + sent;
+        if (candidate.length > 600 && cur) {
+          parts.push(cur.trim());
+          cur = sent;
+        } else {
+          cur = candidate;
         }
       }
-    } catch (apiErr) {
-      console.warn("Fallback /api/tts request notice:", apiErr);
-    }
+      if (cur.trim()) parts.push(cur.trim());
+      return parts.length ? parts : [s.slice(0, 600)];
+    };
+    const segments = splitSpeech(cleanText);
 
-    // Final safety fallback
-    onEnd();
+    const requestSegment = async (seg: string): Promise<HTMLAudioElement | null> => {
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: seg, language: langName })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.audioBase64) {
+            const mime = data.format === 'mp3' ? 'audio/mpeg' : 'audio/wav';
+            const audio = new Audio(`data:${mime};base64,${data.audioBase64}`);
+            try { audio.playbackRate = 1.4; } catch {} // quick 1.4x speech
+            return audio;
+          }
+        }
+      } catch (apiErr) {
+        console.warn("Fallback /api/tts request notice:", apiErr);
+      }
+      return null;
+    };
+
+    // Fetch the FIRST segment right away so speech starts as fast as possible.
+    let audio = await requestSegment(segments[0]);
+    let idx = 0;
+
+    const playNext = async () => {
+      if (!audio || speechTokenRef.current !== myToken) {
+        if (speechTokenRef.current === myToken) onEnd();
+        return;
+      }
+      const current = audio;
+      audioPlayerRef.current = current; // so interrupts (pause) can stop it
+      // Prefetch the next segment in the background while this one is speaking.
+      const nextIdx = idx + 1;
+      const prefetch = nextIdx < segments.length
+        ? requestSegment(segments[nextIdx]).then((a) => (speechTokenRef.current === myToken ? a : null))
+        : Promise.resolve(null);
+
+      current.onended = async () => {
+        if (speechTokenRef.current !== myToken) return; // superseded by a new message
+        audio = await prefetch;
+        idx = nextIdx;
+        playNext();
+      };
+      current.onerror = () => {
+        if (speechTokenRef.current === myToken) onEnd();
+      };
+
+      try {
+        await current.play();
+      } catch (playErr) {
+        console.warn("Segment play notice:", playErr);
+        if (speechTokenRef.current === myToken) onEnd();
+      }
+    };
+
+    await playNext();
   };
 
   // Start continuous listening for caller voice (Google Browser Web Speech API 1st Priority)
