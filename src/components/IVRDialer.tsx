@@ -74,6 +74,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const languageRef = useRef<'kn-IN' | 'hi-IN' | 'en-IN'>('en-IN');
   const ivrStepRef = useRef<string>('welcome');
   const collectedDataRef = useRef<any>({});
+  const dialogueHistoryRef = useRef<Array<{ role: 'user' | 'assistant'; text: string }>>([]);
   const sessionPrefixRef = useRef<string>('');
 
   // Silence / Inactivity Timers (20s first warning, then 10s goodbye)
@@ -96,8 +97,9 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   };
 
   const updateCollectedData = (data: any) => {
-    collectedDataRef.current = data;
-    setCollectedData(data);
+    const merged = { ...collectedDataRef.current, ...data };
+    collectedDataRef.current = merged;
+    setCollectedData(merged);
   };
 
   // Web Audio Context initialization
@@ -302,6 +304,13 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
         });
       }
 
+      // If requested language is Kannada or Hindi and device does NOT have a native voice for it,
+      // return false so the system immediately uses high-fidelity Sarvam AI TTS (audioUrl / /api/tts)
+      // instead of mangling non-English text with an English system voice!
+      if ((prefix === 'kn' || prefix === 'hi') && !voiceMatch) {
+        return false;
+      }
+
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.lang = langCode;
       utterance.rate = 1.35; // Authentic clear cadence
@@ -408,11 +417,12 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
       if (res.ok) {
         const data = await res.json();
-        if (data && data.audioBase64) {
+        const audioSrc = data.audioUrl || (data.audioBase64 ? `data:audio/wav;base64,${data.audioBase64}` : null);
+        if (audioSrc) {
           if (!audioPlayerRef.current) {
             audioPlayerRef.current = new Audio();
           }
-          audioPlayerRef.current.src = `data:audio/wav;base64,${data.audioBase64}`;
+          audioPlayerRef.current.src = audioSrc;
           audioPlayerRef.current.onended = () => onEnd();
           audioPlayerRef.current.onerror = () => onEnd();
           await audioPlayerRef.current.play();
@@ -567,6 +577,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   const startCall = async () => {
     getAudioContext();
     clearSilenceTimers();
+    dialogueHistoryRef.current = [];
     setCallActive(true);
     setCallDuration(0);
     updateStep('welcome');
@@ -588,6 +599,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     greetingCancelRef.current = true;
     interruptSpeaking();
     clearSilenceTimers();
+    dialogueHistoryRef.current = [];
     if (speechRecognitionRef.current) {
       speechRecognitionRef.current.abort();
     }
@@ -642,6 +654,11 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     const activeStep = ivrStepRef.current;
     const currentData = collectedDataRef.current;
 
+    const userTurnText = message || (digits ? `Pressed ${digits}` : (isVoiceNote ? 'Attached voice note' : ''));
+    if (userTurnText) {
+      dialogueHistoryRef.current.push({ role: 'user', text: userTurnText });
+    }
+
     try {
       const response = await fetch('/api/ivr/dialogue', {
         method: 'POST',
@@ -651,6 +668,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
           digits,
           step: activeStep,
           language: activeLanguage,
+          history: dialogueHistoryRef.current,
           profile,
           collectedData: currentData,
           audioNoteUrl: inputAudioUrl,
@@ -661,6 +679,10 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       const data = await response.json();
       setStatusMessage('Connected');
       if (!data) return;
+
+      if (data.text) {
+        dialogueHistoryRef.current.push({ role: 'assistant', text: data.text });
+      }
 
       const nextLang = (data.language || activeLanguage) as 'kn-IN' | 'hi-IN' | 'en-IN';
       updateLanguage(nextLang);

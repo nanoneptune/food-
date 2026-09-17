@@ -440,6 +440,12 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         });
       }
 
+      // If requested language is Kannada or Hindi and device does NOT have a native voice for it,
+      // return false so the assistant immediately uses high-fidelity Sarvam AI TTS (audioUrl / /api/tts)
+      if ((langPrefix === 'kn' || langPrefix === 'hi') && !matchedVoice) {
+        return false;
+      }
+
       if (matchedVoice) {
         utterance.voice = matchedVoice;
       }

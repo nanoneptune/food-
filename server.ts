@@ -9,6 +9,7 @@ import dotenv from "dotenv";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { PassThrough } from "stream";
+import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
@@ -70,7 +71,42 @@ async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 1200
   }
 }
 
-// Universal Fast & Resilient LLM Invocation Helper (Groq + OpenAI)
+// Lazy-initialized Gemini Client
+let geminiClient: GoogleGenAI | null = null;
+function getGeminiClient(): GoogleGenAI | null {
+  const apiKey = (process.env.GEMINI_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
+  if (!apiKey) return null;
+  if (!geminiClient) {
+    try {
+      geminiClient = new GoogleGenAI({ apiKey });
+    } catch (e: any) {
+      console.warn("Could not initialize GoogleGenAI client:", e?.message);
+    }
+  }
+  return geminiClient;
+}
+
+// Robust JSON Extractor & Parser (handles markdown wraps & conversational commentary)
+function cleanAndParseJson(text: string): any {
+  if (!text) return null;
+  let raw = text.trim();
+  if (raw.startsWith('```')) {
+    raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {}
+  const firstBrace = raw.indexOf('{');
+  const lastBrace = raw.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    try {
+      return JSON.parse(raw.slice(firstBrace, lastBrace + 1));
+    } catch {}
+  }
+  return null;
+}
+
+// Universal Fast & Resilient LLM Invocation Helper (Gemini + Groq + OpenAI)
 async function runLLMGeneration({
   system,
   prompt,
@@ -80,6 +116,50 @@ async function runLLMGeneration({
   prompt?: string;
   messages?: any[];
 }): Promise<string> {
+  // 1. Google Gemini via @google/genai
+  const gemini = getGeminiClient();
+  if (gemini) {
+    try {
+      const contents: any[] = [];
+      if (messages && messages.length > 0) {
+        for (const m of messages) {
+          if (m.role === 'system') continue;
+          contents.push({
+            role: m.role === 'assistant' ? 'model' : 'user',
+            parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }]
+          });
+        }
+      } else if (prompt) {
+        contents.push({
+          role: 'user',
+          parts: [{ text: prompt }]
+        });
+      }
+
+      if (contents.length > 0) {
+        const res = await gemini.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents,
+          config: system ? { systemInstruction: system } : undefined,
+        });
+
+        const text = res?.text;
+        if (text && text.trim()) {
+          return text.trim();
+        }
+      }
+    } catch (gErr: any) {
+      console.warn("Gemini generation notice:", gErr?.message);
+    }
+  }
+
+  // 2. Groq Fast LLM Inference (llama-3.3-70b-versatile / llama-3.1-8b-instant)
+  const groqKey = (process.env.GROQ_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
+  const groqModels = [
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant"
+  ];
+
   let formattedMessages = messages && messages.length > 0
     ? messages
     : [
@@ -87,19 +167,9 @@ async function runLLMGeneration({
         { role: "user", content: prompt || "" }
       ];
 
-  if (system && messages && messages.length > 0) {
-    if (messages[0]?.role !== "system") {
-      formattedMessages = [{ role: "system", content: system }, ...messages];
-    }
+  if (system && messages && messages.length > 0 && messages[0]?.role !== "system") {
+    formattedMessages = [{ role: "system", content: system }, ...messages];
   }
-
-  // 1. Primary Option: Groq Fast LLM Inference (llama3-70b-8192 / mixtral-8x7b-32768)
-  const groqKey = process.env.GROQ_API_KEY;
-  const groqModels = [
-    "llama3-70b-8192",
-    "llama3-8b-8192",
-    "mixtral-8x7b-32768",
-  ];
 
   if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
     for (const model of groqModels) {
@@ -113,7 +183,7 @@ async function runLLMGeneration({
           body: JSON.stringify({
             model: model,
             messages: formattedMessages,
-            max_tokens: 600,
+            max_tokens: 800,
           }),
         }, 8000);
 
@@ -127,6 +197,35 @@ async function runLLMGeneration({
       } catch (e: any) {
         console.warn(`Groq API fallback notice for ${model}:`, e?.message);
       }
+    }
+  }
+
+  // 3. OpenAI API (if configured)
+  const openAIKey = (process.env.OPENAI_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
+  if (openAIKey && openAIKey.startsWith("sk-")) {
+    try {
+      const openAiRes = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${openAIKey}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          messages: formattedMessages,
+          max_tokens: 800,
+        }),
+      }, 8000);
+
+      if (openAiRes.ok) {
+        const data: any = await openAiRes.json();
+        const reply = data?.choices?.[0]?.message?.content;
+        if (reply && reply.trim()) {
+          return reply.trim();
+        }
+      }
+    } catch (e: any) {
+      console.warn("OpenAI fallback notice:", e?.message);
     }
   }
 
@@ -615,10 +714,260 @@ function stripEmojis(text: string): string {
     .trim();
 }
 
-// Helper to generate & upload TTS audio to Cloudinary for instant playback
-async function generateTTSAudioUrl(text: string, language: string): Promise<string | null> {
-  // Groq does not have a TTS endpoint. We return null, the client will rely on browser synthesis.
+// High-Fidelity Sarvam AI Text-to-Speech Engine
+async function generateSarvamTTS(text: string, language: string): Promise<string | null> {
+  const sarvamKey = (process.env.SARVAM_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
+  if (!sarvamKey) return null;
+
+  try {
+    let targetLangCode = "kn-IN";
+    let speaker = "kavitha"; // Native Kannada female voice in bulbul:v3
+
+    const langStr = String(language || '').toLowerCase();
+    if (langStr.includes("hi")) {
+      targetLangCode = "hi-IN";
+      speaker = "priya"; // Native Hindi female voice in bulbul:v3
+    } else if (langStr.includes("en")) {
+      targetLangCode = "en-IN";
+      speaker = "aditya"; // Native Indian English voice in bulbul:v3
+    } else {
+      targetLangCode = "kn-IN";
+      speaker = "kavitha";
+    }
+
+    const clean = stripEmojis(text).slice(0, 500);
+    if (!clean) return null;
+
+    const res = await fetch("https://api.sarvam.ai/text-to-speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "api-subscription-key": sarvamKey,
+      },
+      body: JSON.stringify({
+        inputs: [clean],
+        target_language_code: targetLangCode,
+        speaker: speaker,
+        model: "bulbul:v3"
+      }),
+    });
+
+    if (res.ok) {
+      const data: any = await res.json();
+      if (data && data.audios && data.audios[0]) {
+        return `data:audio/wav;base64,${data.audios[0]}`;
+      }
+    }
+  } catch (err: any) {
+    console.warn("Sarvam TTS generation notice:", err?.message);
+  }
   return null;
+}
+
+// Helper to generate TTS audio data URI for instant playback
+async function generateTTSAudioUrl(text: string, language: string): Promise<string | null> {
+  return await generateSarvamTTS(text, language);
+}
+
+// Entity cleaning helper
+function cleanExtractedString(str: string): string {
+  if (!str) return '';
+  return str
+    .replace(/^(ನಾನು|ನನ್ನ|ನನಗೆ|ನಾವು|ಅಲ್ಲಿ|ಇಲ್ಲಿ|ಹೇಳೋ|ಹೇಳ್ತೀನಿ|ಹೇಳಲು|ಹೋಗಿದ್ದು|ಬಂದಿದ್ದು|ನೋಡಿದ್ರೆ|ಆ|ಈ|ಅಂತ|ಎಂಬ|ಹೆಸರಿನ|ಹೆಸರು|ಸ್ಥಳ|ಹೋಟೆಲ್|ರೆಸ್ಟೋರೆಂಟ್)\s+/gi, '')
+    .replace(/\s+(ಆಗಿದೆ|ಇದೆ|ಇತ್ತು|ಆಗಿತ್ತು|ಇರ್ಬೋದು|ಅನ್ನೋದು|ಅಂತ|ಎಂಬ|ಹೋಟೆಲ್|ನಲ್ಲಿ|ಗೆ)$/gi, '')
+    .replace(/^["'`\s]+|["'`\s]+$/g, '')
+    .trim();
+}
+
+interface ExtractedEntities {
+  location?: string;
+  when?: string;
+  cause?: string;
+  item?: string;
+  owner?: string;
+  isExhaustedOrConfirming: boolean;
+  isInformationalInquiry: boolean;
+  hasAllRequired: boolean;
+  missingFields: string[];
+  suggestedPrompt: string;
+}
+
+// Semantic Memory & Customer Word Analyzer for Context Awareness across turns
+function analyzeCustomerWords(
+  currentText: string,
+  history: Array<{ role: string; text?: string; content?: string }> = [],
+  existingData: any = {},
+  language: string = 'kn-IN'
+): ExtractedEntities {
+  const allUserTexts = [
+    ...history.filter(h => h.role === 'user').map(h => h.text || h.content || ''),
+    currentText || ''
+  ].join(' ');
+
+  const isKannada = language.startsWith('kn') || language.toLowerCase().includes('kannada');
+  const isHindi = language.startsWith('hi') || language.toLowerCase().includes('hindi');
+
+  const entities: ExtractedEntities = {
+    location: existingData.location || undefined,
+    when: existingData.when || undefined,
+    cause: existingData.cause || undefined,
+    item: existingData.item || undefined,
+    owner: existingData.owner || undefined,
+    isExhaustedOrConfirming: false,
+    isInformationalInquiry: false,
+    hasAllRequired: false,
+    missingFields: [],
+    suggestedPrompt: ''
+  };
+
+  // 1. Check for customer exhaustion / confirmation
+  const exhaustionRegex = /(ಅಷ್ಟೇ|ಇಷ್ಟೇ|ಎಷ್ಟೇ|ನನಗೆ.*ಗೊತ್ತಿಲ್ಲ|ಬೇರೇನೂ.*ಇಲ್ಲ|ಎಲ್ಲ.*ಹೇಳಿದೆ|ಮುಗಿಯಿತು|ದೂರು.*ದಾಖಲಿಸಿ|ದೃಢೀಕರಿಸಿ|ಸರಿ|ಹೌದು|ಅಷ್ಟೇ ಕಣ್ರಿ|ಇಷ್ಟೇ ಗೊತ್ತಿರೋದು|ಬಸ್ ಇಷ್ಟೇ|confirm|submit|yes|that is all|that's all|i told you|nothing more|proceed|all details given|itna hi|itna hi pata|ho gaya|darj karo|pusti)/i;
+  if (exhaustionRegex.test(currentText)) {
+    entities.isExhaustedOrConfirming = true;
+  }
+
+  // 2. Check for informational inquiries (FSSAI laws, hygiene rules, licenses)
+  const infoRegex = /(fssai|license|licence|hygiene rule|inspection|penalty|fine|ನಿಯಮ|ಪರವಾನಗಿ|ದಂಡ|ತನಿಖೆ|ನಿಯಮಾವಳಿ|ಪ್ರಮಾಣಪತ್ರ|ನಿಯಮಗಳು|ಲೈಸೆನ್ಸ್|ನಿಯಮಾವಳಿಗಳು|कानून|नियम|लाइसेंस|जुर्माना|जांच प्रक्रिया)/i;
+  if (infoRegex.test(currentText) && !currentText.includes('ಹೋಟೆಲ್') && !currentText.includes('ದೂರು')) {
+    entities.isInformationalInquiry = true;
+  }
+
+  // 3. Location / Restaurant Name Extraction
+  if (!entities.location) {
+    const knHotelMatch = allUserTexts.match(/(?:ಹೋಟೆಲ್|ಹೊಟೆಲ್|ರೆಸ್ಟೋರೆಂಟ್|ಕ್ಯಾಂಟೀನ್|ಧಾಬಾ|ಬೇಕರಿ|ಶಾಪ್|ಶಾಪ್‌)\s+([^\s,.\n]+(?:\s+[^\s,.\n]+){0,2})|([^\s,.\n]+(?:\s+[^\s,.\n]+){0,2})\s+(?:ಹೋಟೆಲ್|ಹೊಟೆಲ್|ರೆಸ್ಟೋರೆಂಟ್|ಕ್ಯಾಂಟೀನ್|ಧಾಬಾ|ಬೇಕರಿ)/i);
+    if (knHotelMatch) {
+      const captured = cleanExtractedString(knHotelMatch[1] || knHotelMatch[2] || '');
+      if (captured && captured.length > 2 && !/^(ಇದೆ|ಇತ್ತು|ಆಗಿದೆ|ನಾನು|ನೀವು)$/.test(captured)) {
+        entities.location = `${captured} ಹೋಟೆಲ್`;
+      }
+    }
+    if (!entities.location) {
+      const knSpecific = allUserTexts.match(/(ಅನ್ನಪೂರ್ಣೇಶ್ವರಿ|ಅನ್ನಪೂರ್ಣ|ಉಡುಪಿ|ಶಾಂತಿ ಸಾಗರ್|ಕಾಮತ್|ಮಾಯೂರ|ನಂದಿನಿ|ನಂದಗೋಕುಲ|ಗುರು ಕೃಪಾ|ವೆಂಕಟೇಶ್ವರ|ಶ್ರೀ ಕೃಷ್ಣ|ಅಯೋಧ್ಯ|ಹಳ್ಳಿ ಮನೆ)/i);
+      if (knSpecific) {
+        entities.location = `${knSpecific[1]} ಹೋಟೆಲ್`;
+      }
+    }
+    if (!entities.location) {
+      const hiHotelMatch = allUserTexts.match(/(?:होटल|रेस्टोरेंट|ढाबा|दुकान|कैंटीन)\s+([^\s,.\n]+(?:\s+[^\s,.\n]+){0,2})|([^\s,.\n]+(?:\s+[^\s,.\n]+){0,2})\s+(?:होटल|रेस्टोरेंट|ढाबा|दुकान)/i);
+      if (hiHotelMatch) {
+        const captured = cleanExtractedString(hiHotelMatch[1] || hiHotelMatch[2] || '');
+        if (captured && captured.length > 2) entities.location = `${captured} होटल`;
+      }
+    }
+    if (!entities.location) {
+      const enHotelMatch = allUserTexts.match(/(?:at|in|from|hotel|restaurant|cafe|dhaba)\s+([A-Z][a-zA-Z0-9\s'-]{2,25}(?:Hotel|Restaurant|Cafe|Dhaba|Kitchen|Bhavan|Sagar)?)/i);
+      if (enHotelMatch && enHotelMatch[1]) {
+        const captured = enHotelMatch[1].trim();
+        if (!/^(the|yesterday|today|night|evening|morning|food|dinner)$/i.test(captured)) {
+          entities.location = captured;
+        }
+      }
+    }
+  }
+
+  // 4. Incident Timing (When) Extraction
+  if (!entities.when) {
+    const knTimeMatch = allUserTexts.match(/(ನಿನ್ನೆ\s*(?:ರಾತ್ರಿ|ಸಂಜೆ|ಬೆಳಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ)?|ಇಂದು\s*(?:ರಾತ್ರಿ|ಸಂಜೆ|ಬೆಳಗ್ಗೆ|ಮಧ್ಯಾಹ್ನ)?|ಮೊನ್ನೆ|ಈಗಲೇ|ಬೆಳಗ್ಗೆ\s*\d*(?::\d*)?|ಸಂಜೆ\s*\d*(?::\d*)?|ರಾತ್ರಿ\s*\d*(?::\d*)?|\d{1,2}[:.]\d{2}\s*(?:ಗಂಟೆಗೆ|pm|am)?|\d{1,2}\s*(?:ತಾರೀಖು|ದಿನಾಂಕ|ದಿನದ ಹಿಂದೆ))/i);
+    if (knTimeMatch) {
+      entities.when = knTimeMatch[0].trim();
+    }
+    if (!entities.when) {
+      const hiTimeMatch = allUserTexts.match(/(कल\s*(?:रात|शाम|सुबह|दोपहर)?|आज\s*(?:रात|शाम|सुबह|दोपहर)?|परसों|शाम को|रात को|सुबह को|\d{1,2}[:.]\d{2}\s*(?:बजे|pm|am)?)/i);
+      if (hiTimeMatch) {
+        entities.when = hiTimeMatch[0].trim();
+      }
+    }
+    if (!entities.when) {
+      const enTimeMatch = allUserTexts.match(/(yesterday(?:\s*(?:night|evening|morning|afternoon))?|today(?:\s*(?:night|evening|morning|afternoon))?|last night|\d{1,2}[:.]\d{2}\s*(?:am|pm)?|\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))/i);
+      if (enTimeMatch) {
+        entities.when = enTimeMatch[0].trim();
+      }
+    }
+  }
+
+  // 5. Cause & Violation Extraction
+  if (!entities.cause) {
+    const knCauseMatch = allUserTexts.match(/(ಉಪ್ಪು\s*ಜಾಸ್ತಿ|ಸೋಡಿಯಂ|ಕಲುಷಿತ|ವಾಸನೆ|ಹುಳು|ಹುಳ|ಕೂದಲು|ಹಾಳಾಗಿದೆ|ಹಳಸಿದ|ವಾಂತಿ|ಹೊಟ್ಟೆ\s*ನೋವು|ಕೊಳಕು|ಕೃತಕ\s*ಬಣ್ಣ|ಕಲ್ಮಶ|ಪ್ಲಾಸ್ಟಿಕ್|ಅಜೀರ್ಣ|ಬೇಧಿ|ಆಸ್ಪತ್ರೆ|ವಿಷಾಹಾರ|ವಿಷಪೂರಿತ|ಕೆಟ್ಟ\s*ರುಚಿ)/i);
+    if (knCauseMatch) {
+      entities.cause = knCauseMatch[0].trim();
+    }
+    const hiCauseMatch = allUserTexts.match(/(नमक\s*ज्यादा|सोडियम|बासी|कीड़ा|बाल|दुर्गंध|बदबू|उल्टी|पेट\s*दर्द|गंदा|नकली\s*रंग|विषाक्त|फूड\s*पॉइजनिंग|खराब|सड़ा)/i);
+    if (!entities.cause && hiCauseMatch) {
+      entities.cause = hiCauseMatch[0].trim();
+    }
+    const enCauseMatch = allUserTexts.match(/(excess(?:\s+of)?\s*(?:salt|sodium)|food poisoning|stomach (?:ache|pain)|vomiting|dead (?:insect|cockroach|fly)|hair in food|foul smell|spoiled|contaminated|stale|dirty|unhygienic|rotten)/i);
+    if (!entities.cause && enCauseMatch) {
+      entities.cause = enCauseMatch[0].trim();
+    }
+  }
+
+  // 6. Food Item Name Extraction
+  if (!entities.item) {
+    const itemMatch = allUserTexts.match(/(ದೋಸೆ|ಇಡ್ಲಿ|ಬಿರಿಯಾನಿ|ಅನ್ನ|ಸಾಂಬಾರ್|ಪಲ್ಯ|ಪರೋಟ|ರೊಟ್ಟಿ|ಚಪಾತಿ|ಊಟ|ಚಿಕನ್|ಮಟನ್|ಮೀನು|ರಸಂ|ಮಜ್ಜಿಗೆ|ನೀರು|ಚಹಾ|ಕಾಫಿ|ದೋಸಾ|इडली|डोसा|बिरयानी|चावल|सांभर|रोटी|सब्जी|दाल|पानी|biryani|dosa|idli|rice|meals|curry|sambar|paneer|chicken|mutton|roti)/i);
+    if (itemMatch) {
+      entities.item = itemMatch[0].trim();
+    }
+  }
+
+  // 7. Owner Name Extraction
+  if (!entities.owner) {
+    const ownerMatch = allUserTexts.match(/(?:ಮಾಲೀಕರು|ಮಾಲೀಕ|ಓನರ್|ಹೆಸರು|owner|malik)\s+([^\s,.\n]+)/i);
+    if (ownerMatch) {
+      entities.owner = cleanExtractedString(ownerMatch[1]);
+    }
+  }
+
+  // 8. Missing Fields computation
+  if (!entities.location) entities.missingFields.push('location');
+  if (!entities.when) entities.missingFields.push('when');
+  if (!entities.cause) entities.missingFields.push('cause');
+
+  entities.hasAllRequired = entities.missingFields.length === 0;
+
+  // 9. Formulate an intelligent prompt in selected language
+  if (entities.hasAllRequired || entities.isExhaustedOrConfirming) {
+    if (isKannada) {
+      entities.suggestedPrompt = "ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ತಮ್ಮ ದೂರನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗಿದೆ. ತಾವು ಸ್ವತಃ ಧ್ವನಿ ಸಂದೇಶ ರೆಕಾರ್ಡ್ ಮಾಡಲು ಬಯಸಿದರೆ 7 ಒತ್ತಿ, ಅಥವಾ ದೂರನ್ನು ಸಲ್ಲಿಸಲು 9 ಒತ್ತಿ.";
+    } else if (isHindi) {
+      entities.suggestedPrompt = "धन्यवाद। हमने विवरण नोट कर लिया है। यदि आप ऑडियो संदेश रिकॉर्ड करना चाहते हैं तो 7 दबाएँ, अथवा शिकायत दर्ज करने के लिए 9 दबाएँ।";
+    } else {
+      entities.suggestedPrompt = "Thank you. We have recorded your complaint. If you would like to record a voice note, press 7. To submit your complaint now, press 9 or say confirm.";
+    }
+  } else {
+    if (entities.missingFields.includes('location')) {
+      if (isKannada) {
+        entities.suggestedPrompt = "ದಯವಿಟ್ಟು ಈ ಘಟನೆ ನಡೆದ ಹೋಟೆಲ್, ರೆಸ್ಟೋರೆಂಟ್ ಅಥವಾ ಅಂಗಡಿಯ ಹೆಸರನ್ನು ಸವಿನಯವಾಗಿ ತಿಳಿಸುವಿರಾ?";
+      } else if (isHindi) {
+        entities.suggestedPrompt = "कृपया उस होटल, रेस्टोरेंट या दुकान का नाम बताएं जहाँ यह घटना हुई।";
+      } else {
+        entities.suggestedPrompt = "Could you please tell us the name of the hotel, restaurant, or outlet where this incident occurred?";
+      }
+    } else if (entities.missingFields.includes('when')) {
+      const locAck = entities.location ? `${entities.location} ನಮೂದಿಸಲಾಗಿದೆ. ` : '';
+      const locAckHi = entities.location ? `${entities.location} नोट कर लिया गया है। ` : '';
+      const locAckEn = entities.location ? `Noted ${entities.location}. ` : '';
+      if (isKannada) {
+        entities.suggestedPrompt = `${locAck}ದಯವಿಟ್ಟು ಈ ಘಟನೆ ಯಾವ ದಿನ ಅಥವಾ ಯಾವ ಸಮಯದಲ್ಲಿ ನಡೆಯಿತು ಎಂದು ತಿಳಿಸುವಿರಾ?`;
+      } else if (isHindi) {
+        entities.suggestedPrompt = `${locAckHi}कृपया बताएं कि यह घटना किस तारीख या किस समय हुई थी?`;
+      } else {
+        entities.suggestedPrompt = `${locAckEn}Could you please mention the date or approximate time of this incident?`;
+      }
+    } else if (entities.missingFields.includes('cause')) {
+      const locAck = entities.location ? `${entities.location} ನಮೂದಿಸಲಾಗಿದೆ. ` : '';
+      const locAckHi = entities.location ? `${entities.location} नोट कर लिया गया है। ` : '';
+      const locAckEn = entities.location ? `Noted ${entities.location}. ` : '';
+      if (isKannada) {
+        entities.suggestedPrompt = `${locAck}ಆಹಾರದಲ್ಲಿ ತಾವು ಎದುರಿಸಿದ ನಿಖರವಾದ ಲೋಪ ಅಥವಾ ನೈರ್ಮಲ್ಯ ಸಮಸ್ಯೆಯನ್ನು ತಿಳಿಸುವಿರಾ?`;
+      } else if (isHindi) {
+        entities.suggestedPrompt = `${locAckHi}कृपया भोजन में आई खराबी या स्वच्छता संबंधी समस्या का विवरण बताएं।`;
+      } else {
+        entities.suggestedPrompt = `${locAckEn}Could you please describe what was wrong with the food or hygiene?`;
+      }
+    }
+  }
+
+  return entities;
 }
 
 // API: Chat with Assistant (Grounding on recognized knowledge base & zero-delay QA cache)
@@ -631,54 +980,57 @@ app.post("/api/chat", async (req, res) => {
   const queryText = message.trim();
   const targetLang = language || "English";
 
-  // 1. Check Turso DB qa_cache for pre-computed / cached intent answers
-  try {
-    const turso = getTurso();
-    if (turso) {
-      const cacheRes = await turso.execute({
-        sql: "SELECT * FROM qa_cache WHERE language = ? ORDER BY created_at DESC LIMIT 40",
-        args: [targetLang]
-      });
+  // Semantic Memory & Customer Words Analysis across turns
+  const analysis = analyzeCustomerWords(queryText, history, {}, targetLang);
 
-      if (cacheRes && cacheRes.rows && cacheRes.rows.length > 0) {
-        const rows = cacheRes.rows as any[];
-        
-        // Exact normalized string match check (only for long specific FAQs)
-        const cleanUserQ = queryText.toLowerCase().replace(/[^a-z0-9\u0900-\u097F\u0C80-\u0CFF]/g, '').trim();
-        let matchedRow = cleanUserQ.length > 10 ? rows.find(r => {
-          const cleanQ = String(r.question || '').toLowerCase().replace(/[^a-z0-9\u0900-\u097F\u0C80-\u0CFF]/g, '').trim();
-          return cleanQ === cleanUserQ;
-        }) : null;
+  // 1. Check Turso DB qa_cache for pre-computed FAQ answers ONLY if this is not a specific incident/complaint
+  const isIncidentReport = /(incident|complaint|hotel|food|restaurant|ದೂರು|ಹೋಟೆಲ್|ಆಹಾರ|ಉಪ್ಪು|ಹುಳು|ವಾಂತಿ|ಹೊಟ್ಟೆ|ಅನ್ನಪೂರ್ಣೇಶ್ವರಿ|ವಾಸನೆ|ಕೊಳಕು|ಹಾಳಾಗಿದೆ|ನೋವು|ಆಸ್ಪತ್ರೆ|ಬೇಧಿ|ದಯವಿಟ್ಟು|ಮಧ್ಯಾಹ್ನ|ರಾತ್ರಿ|ಸಂಜೆ|ಬೆಳಗ್ಗೆ|ನಿನ್ನೆ|ಇಂದು|ಬಿರಿಯಾನಿ|ದೋಸೆ|ಇಡ್ಲಿ|ಅನ್ನ|ಸಾಂಬಾರ್|शिकायत|होटल|खाना|नमक|कीड़ा|उल्टी|बासी|सड़ा|दुकान|रेस्टोरेंट)/i.test(queryText);
+  if (!isIncidentReport && !analysis.location && !analysis.cause) {
+    try {
+      const turso = getTurso();
+      if (turso) {
+        const cacheRes = await turso.execute({
+          sql: "SELECT * FROM qa_cache WHERE language = ? ORDER BY created_at DESC LIMIT 40",
+          args: [targetLang]
+        });
 
-        if (matchedRow) {
-          console.log(`[QA Cache Hit] Pre-generated answer used for: "${queryText}" -> Matched: "${matchedRow.question}"`);
-          let audioUrl = matchedRow.audio_url;
-          if (!audioUrl) {
-            audioUrl = await generateTTSAudioUrl(matchedRow.answer, targetLang);
-            if (audioUrl && turso) {
-              turso.execute({
-                sql: "UPDATE qa_cache SET audio_url = ? WHERE id = ?",
-                args: [audioUrl, matchedRow.id]
-              }).catch(() => {});
+        if (cacheRes && cacheRes.rows && cacheRes.rows.length > 0) {
+          const rows = cacheRes.rows as any[];
+          const cleanUserQ = queryText.toLowerCase().replace(/[^a-z0-9\u0900-\u097F\u0C80-\u0CFF]/g, '').trim();
+          let matchedRow = cleanUserQ.length > 10 ? rows.find(r => {
+            const cleanQ = String(r.question || '').toLowerCase().replace(/[^a-z0-9\u0900-\u097F\u0C80-\u0CFF]/g, '').trim();
+            return cleanQ === cleanUserQ;
+          }) : null;
+
+          if (matchedRow) {
+            console.log(`[QA Cache Hit] Pre-generated answer used for: "${queryText}" -> Matched: "${matchedRow.question}"`);
+            let audioUrl = matchedRow.audio_url;
+            if (!audioUrl) {
+              audioUrl = await generateTTSAudioUrl(matchedRow.answer, targetLang);
+              if (audioUrl && turso) {
+                turso.execute({
+                  sql: "UPDATE qa_cache SET audio_url = ? WHERE id = ?",
+                  args: [audioUrl, matchedRow.id]
+                }).catch(() => {});
+              }
             }
+            return res.json({
+              response: matchedRow.answer,
+              audioUrl: audioUrl || null,
+              cached: true,
+              isComplaintDraft: false
+            });
           }
-          return res.json({
-            response: matchedRow.answer,
-            audioUrl: audioUrl || null,
-            cached: true,
-            isComplaintDraft: false
-          });
         }
       }
+    } catch (cacheErr: any) {
+      console.warn("Turso QA cache query notice:", cacheErr?.message);
     }
-  } catch (cacheErr: any) {
-    console.warn("Turso QA cache query notice:", cacheErr?.message);
   }
 
   try {
     let effectiveContext = context || "";
 
-    // If context not passed from client, query Turso directly
     if (!effectiveContext.trim()) {
       try {
         const turso = getTurso();
@@ -688,8 +1040,6 @@ app.post("/api/chat", async (req, res) => {
         console.warn("Could not load knowledge from Turso in /api/chat:", dbErr?.message);
       }
     }
-
-    const turnCount = Number(req.body.chatCount) || (Array.isArray(history) ? Math.floor(history.length / 2) + 1 : 1);
 
     const systemPrompt = `You are VoxAssist's expert AI Food Safety, Hygiene, and Standards Inspection Authority Assistant.
 You represent the Official Government Food Safety & Hygiene Consumer Grievance Portal.
@@ -705,19 +1055,31 @@ KNOWLEDGE BASE & REGULATORY DIRECTIVES:
 ${effectiveContext || "Standard FSSAI Food Safety & Standards Guidelines apply."}
 """
 
-TARGET RESPONSE LANGUAGE: ${language || "English"}.
+TARGET RESPONSE LANGUAGE: ${targetLang}.
+CRITICAL LANGUAGE MANDATE:
+Every single word of your response MUST strictly be in ${targetLang}.
+If Kannada, write purely in Kannada script (ಕನ್ನಡ ಲಿಪಿ). If Hindi, write purely in Devanagari script (हिंदी). If English, write in English. Do NOT mix languages!
+
+SEMANTIC ANALYSIS OF CURRENT CONVERSATION STATE:
+- Identified Establishment / Location (WHERE): ${analysis.location || "Not yet stated"}
+- Incident Timing (WHEN): ${analysis.when || "Not yet stated"}
+- Cause / Violation (CAUSE): ${analysis.cause || "Not yet stated"}
+- Food Item: ${analysis.item || "Not yet stated"}
+- Outlet Owner: ${analysis.owner || "Not yet stated"}
+- Missing Required Fields: ${analysis.missingFields.join(", ") || "None (All details present)"}
+- Customer Exhaustion / Done Talking: ${analysis.isExhaustedOrConfirming ? "YES" : "NO"}
+- Informational / Legal Inquiry: ${analysis.isInformationalInquiry ? "YES" : "NO"}
 
 STRICT CONVERSATION & RESPONSE RULES:
 1. INFORMATIONAL QUESTIONS:
-   - If the citizen asks a question about food safety regulations, FSSAI licensing, hygiene inspection rules, adulteration testing, food safety laws, or penalties, answer directly, precisely, and accurately with statutory guidance in the requested language (${language || "English"}).
+   - If the citizen asks a question about food safety regulations, FSSAI licensing, hygiene inspection rules, adulteration testing, food safety laws, or penalties, answer directly, precisely, and accurately with statutory guidance in the requested language (${targetLang}).
    - Always use polite, respectful honorifics in Kannada (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ).
 
 2. COMPLAINT & GRIEVANCE REPORTING FLOW:
-   - When the citizen reports a specific food safety violation, unhygienic restaurant/vendor, spoiled/contaminated food, food poisoning incident, or foreign object (insects, hair, glass, chemical odor):
-     a) Express high empathy and serious concern for consumer health.
-     b) Note down the incident details: WHERE (outlet/vendor/location), WHEN (date & time), and CAUSES/VIOLATIONS (symptoms, items, contamination details).
-     c) If key details are missing, ask for them politely one by one.
-     d) Once details are clear, generate the official Food Safety Grievance Report using the Markdown structure below, and append COMPLAINT_DRAFT_REQUEST at the end.
+   - NEVER repeat a question for any detail that is already known above!
+   - If the customer provided the missing details OR said that is all they know (Customer Exhaustion = YES) OR if WHERE, WHEN, and CAUSE are present:
+     Generate the official Food Safety Grievance Report using the Markdown structure below, and append COMPLAINT_DRAFT_REQUEST at the end.
+   - If any detail is missing, acknowledge what was already provided, and ask politely for ONLY the missing detail.
 
 HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
 # 📋 Official Food Safety & Inspection Grievance Report
@@ -730,10 +1092,10 @@ HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
 | :--- | :--- |
 | **Complainant Name** | ${profile?.name || "Valued Citizen"} |
 | **Contact Phone** | ${profile?.phone || "Registered Phone"} |
-| **Establishment / Location (WHERE)** | [Extracted Location/Branch] |
-| **Incident Date & Time (WHEN)** | [Extracted Date/Time] |
-| **Target Food Product** | [Extracted Food Item] |
-| **Violation / Contamination (CAUSE)** | [Extracted Cause/Violation] |
+| **Establishment / Location (WHERE)** | ${analysis.location || "[Extracted Location/Branch]"} |
+| **Incident Date & Time (WHEN)** | ${analysis.when || "[Extracted Date/Time]"} |
+| **Target Food Product** | ${analysis.item || "Reported Food Item"} |
+| **Violation / Contamination (CAUSE)** | ${analysis.cause || "[Extracted Cause/Violation]"} |
 | **Logged Timestamp** | ${new Date().toLocaleString()} |
 
 ---
@@ -762,7 +1124,7 @@ HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
 
     const fullMessages = [
       ...conversationHistory,
-      { role: "user", content: message }
+      { role: "user", content: queryText }
     ];
 
     let responseText = await runLLMGeneration({
@@ -770,14 +1132,24 @@ HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
       messages: fullMessages,
     });
 
-    // Guaranteed natural fallback response if keys fail
-    if (!responseText) {
-      if (language === 'Kannada') {
-        responseText = "ನಮಸ್ಕಾರ! ಇದು ಆಹಾರ ಸುರಕ್ಷತೆ ಮತ್ತು ನೈರ್ಮಲ್ಯ ಪರಿಶೀಲನೆ ಸಹಾಯವಾಣಿ. ಇಂದು ನಿಮ್ಮ ಆಹಾರ ಸುರಕ್ಷತಾ ದೂರಿಗೆ ನಾನು ಹೇಗೆ ಸಹಾಯ ಮಾಡಲಿ?";
-      } else if (language === 'Hindi') {
-        responseText = "नमस्ते! यह खाद्य सुरक्षा एवं स्वच्छता निरीक्षण हेल्पलाइन है। आज आपकी खाद्य सुरक्षा या शिकायत दर्ज करने में मैं कैसे सहायता कर सकता हूँ?";
+    // Intelligent context-aware fallback if LLM returned empty or repetitive response
+    if (!responseText || responseText.trim().length < 5) {
+      if (analysis.hasAllRequired || analysis.isExhaustedOrConfirming) {
+        const refId = `#FS-${Date.now().toString().slice(-6)}`;
+        const loc = analysis.location || "ಹೋಟೆಲ್ / ಆಹಾರ ಮಳಿಗೆ";
+        const tim = analysis.when || "ಇತ್ತೀಚೆಗೆ";
+        const cau = analysis.cause || "ಆಹಾರ ನೈರ್ಮಲ್ಯ ಹಾಗೂ ಗುಣಮಟ್ಟದ ಲೋಪ";
+        const itm = analysis.item || "ಆಹಾರ ಪದಾರ್ಥ";
+
+        if (targetLang === 'Kannada') {
+          responseText = `ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು ${profile?.name || ''}. ತಮ್ಮ ಆಹಾರ ಸುರಕ್ಷತಾ ದೂರನ್ನು ಅಧಿಕೃತವಾಗಿ ಸ್ವೀಕರಿಸಲಾಗಿದೆ. ನಾವು ಸಂಬಂಧಪಟ್ಟ ಆಹಾರ ಸುರಕ್ಷತಾ ಅಧಿಕಾರಿಗೆ (FSO) ತಕ್ಷಣದ ಸ್ಥಳ ಪರಿಶೀಲನೆಗೆ ರವಾನಿಸುತ್ತೇವೆ.\n\n# 📋 Official Food Safety & Inspection Grievance Report\n> **Reference ID:** ${refId} | **Authority:** ಆಹಾರ ಸುರಕ್ಷತೆ ಮತ್ತು ಗುಣಮಟ್ಟ ಇಲಾಖೆ | **Priority:** ತುರ್ತು | **Status:** ತನಿಖೆಗೆ ದಾಖಲಾಗಿದೆ\n\n---\n\n### 📍 Incident & Inspection Summary\n| ವಿವರ | ದಾಖಲೆ |\n| :--- | :--- |\n| **ದೂರುದಾರರ ಹೆಸರು** | ${profile?.name || "ಗೌರವಾನ್ವಿತ ನಾಗರಿಕರು"} |\n| **ಸಂಪರ್ಕ ಸಂಖ್ಯೆ** | ${profile?.phone || "ದಾಖಲಿತ ದೂರವಾಣಿ"} |\n| **ಸ್ಥಳ / ಸಂಸ್ಥೆ (WHERE)** | ${loc} |\n| **ದಿನಾಂಕ ಮತ್ತು ಸಮಯ (WHEN)** | ${tim} |\n| **ಆಹಾರ ಪದಾರ್ಥ** | ${itm} |\n| **ದೂರಿನ ಕಾರಣ (CAUSE)** | ${cau} |\n| **ದಾಖಲಾದ ಸಮಯ** | ${new Date().toLocaleString('kn-IN')} |\n\n---\n\n### 🔍 ತನಿಖಾ ನಿರ್ದೇಶನ\n1. ಆಹಾರ ಸುರಕ್ಷತಾ ಅಧಿಕಾರಿಗಳಿಂದ (FSO) ಸ್ಥಳ ಪರಿಶೀಲನೆ.\n2. ಆಹಾರ ಮಾದರಿಗಳ ಜಪ್ತಿ ಮತ್ತು ಪ್ರಯೋಗಾಲಯ ಪರೀಕ್ಷೆ.\n3. ಲೋಪ ಎಸಗಿದ ಸಂಸ್ಥೆಗೆ ಕಾರಣ ಕೇಳಿ ನೋಟಿಸ್ ಜಾರಿ.\n\nCOMPLAINT_DRAFT_REQUEST`;
+        } else if (targetLang === 'Hindi') {
+          responseText = `धन्यवाद ${profile?.name || ''}। आपकी खाद्य सुरक्षा शिकायत आधिकारिक रूप से दर्ज कर ली गई है। हम खाद्य सुरक्षा अधिकारी (FSO) को तुरंत निरीक्षण के लिए भेज रहे हैं।\n\n# 📋 Official Food Safety & Inspection Grievance Report\n> **Reference ID:** ${refId} | **Authority:** खाद्य सुरक्षा एवं मानक प्रभाग | **Priority:** अति आवश्यक | **Status:** जांच हेतु दर्ज\n\n---\n\n### 📍 Incident & Inspection Summary\n| विवरण | रिकॉर्ड |\n| :--- | :--- |\n| **शिकायतकर्ता का नाम** | ${profile?.name || "सम्मानित नागरिक"} |\n| **संपर्क फोन** | ${profile?.phone || "पंजीकृत फोन"} |\n| **स्थान / होटल (WHERE)** | ${loc} |\n| **घटना की तिथि/समय (WHEN)** | ${tim} |\n| **खाद्य सामग्री** | ${itm} |\n| **समस्या का कारण (CAUSE)** | ${cau} |\n| **दर्ज समय** | ${new Date().toLocaleString('hi-IN')} |\n\nCOMPLAINT_DRAFT_REQUEST`;
+        } else {
+          responseText = `Thank you ${profile?.name || ''}. Your food safety complaint has been formally registered. A Food Safety Officer (FSO) will conduct an inspection.\n\n# 📋 Official Food Safety & Inspection Grievance Report\n> **Reference ID:** ${refId} | **Authority:** Food Safety Inspection Division | **Priority:** Urgent | **Status:** Logged for Enforcement\n\n---\n\n### 📍 Incident & Inspection Summary\n| Parameter | Details |\n| :--- | :--- |\n| **Complainant Name** | ${profile?.name || "Valued Citizen"} |\n| **Contact Phone** | ${profile?.phone || "Registered Phone"} |\n| **Establishment / Location (WHERE)** | ${loc} |\n| **Incident Date & Time (WHEN)** | ${tim} |\n| **Target Food Product** | ${itm} |\n| **Violation / Contamination (CAUSE)** | ${cau} |\n| **Logged Timestamp** | ${new Date().toLocaleString()} |\n\nCOMPLAINT_DRAFT_REQUEST`;
+        }
       } else {
-        responseText = "Greetings! This is the Food Safety & Inspection Authority Helpline. How may I assist you with your food safety or hygiene grievance today?";
+        responseText = analysis.suggestedPrompt;
       }
     }
 
@@ -1038,14 +1410,23 @@ ${updatedData.audioNoteUrl ? `**Voice Note Attached (MP3):** [Play Voice Evidenc
     }
     // 4. Ongoing conversation to collect information (Where, When, Cause)
     else {
-      // Use LLM to extract cause, location, and when calmly
+      // Analyze customer words with semantic context memory
+      const analysis = analyzeCustomerWords(message, history, updatedData, currentLang);
+      if (analysis.location && !updatedData.location) updatedData.location = analysis.location;
+      if (analysis.when && !updatedData.when) updatedData.when = analysis.when;
+      if (analysis.cause && !updatedData.cause) updatedData.cause = analysis.cause;
+      if (analysis.item && !updatedData.item) updatedData.item = analysis.item;
+      if (analysis.owner && !updatedData.owner) updatedData.owner = analysis.owner;
+
       const prompt = `You are a calm, gentle, highly empathetic, and polite IVR Phone Agent for VoxAssist Consumer Food Safety Helpline.
 User profile: Name: ${profile?.name || "Caller"}, Phone: ${profile?.phone || "On File"}, Location: ${profile?.location || "Not given"}.
-Currently known details:
+Currently known details from memory:
 - Cause: ${updatedData.cause || "Unknown"}
 - Location/Where: ${updatedData.location || "Unknown"}
 - When: ${updatedData.when || "Unknown"}
 - Item: ${updatedData.item || "Unknown"}
+- Missing Required Fields: ${analysis.missingFields.join(", ") || "None"}
+- Customer Exhaustion / Done Talking: ${analysis.isExhaustedOrConfirming ? "YES" : "NO"}
 
 Customer just said: "${message}"
 
@@ -1053,21 +1434,21 @@ Selected Language: ${langName} (${currentLang}).
 
 CRITICAL MANDATORY INSTRUCTIONS:
 1. You MUST generate the spokenResponse 100% in ${langName}. If the language is Kannada (${isKannada ? 'YES' : 'NO'}), EVERY SINGLE WORD must be in Kannada script. If Hindi (${isHindi ? 'YES' : 'NO'}), EVERY SINGLE WORD must be in Hindi script. NEVER use English words for Kannada/Hindi callers.
-2. Identify any newly mentioned cause (what went wrong/details), location/where (restaurant name, branch, address), when (date or time), or food item name.
-3. If any of the following details are missing, calmly and politely ask the customer for them (one question at a time, with absolute politeness):
+2. DO NOT ask for any details that are already known in memory!
+3. If any of the following details are missing, calmly and politely ask the customer for ONLY ONE missing detail:
    - WHERE (the specific restaurant, branch, or outlet name)
    - WHEN (the date and approximate time of the incident)
    - CAUSE / DETAILS (what was wrong with the food or service)
 4. When speaking Kannada, ALWAYS use polite and respectful honorifics (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ, ತಿಳಿಸಿಕೊಡಿ, ಕ್ಷಮಿಸಿ).
 5. When speaking Hindi, ALWAYS use polite honorifics (नमस्ते, कृपया, आप, आपका, धन्यवाद).
-6. If ALL THREE (Cause, Location/Where, and When) are now known:
-   Calmly summarize the collected details and state:
+6. If Cause, Location, and When are known OR if Customer Exhaustion is YES:
+   Calmly summarize and state:
    ${isKannada 
      ? '"ಧನ್ಯವಾದಗಳು, ವಿವರಗಳನ್ನು ದಾಖಲಿಸಲಾಗಿದೆ. ತಾವು ಧ್ವನಿ ಸಂದೇಶ ರೆಕಾರ್ಡ್ ಮಾಡಲು ಬಯಸಿದರೆ 7 ಒತ್ತಿ, ಅಥವಾ ದೂರನ್ನು ಸಲ್ಲಿಸಲು 9 ಒತ್ತಿ."' 
      : (isHindi 
         ? '"धन्यवाद, विवरण दर्ज कर लिया गया है। यदि आप ऑडियो संदेश रिकॉर्ड करना चाहते हैं तो 7 दबाएँ, अथवा शिकायत दर्ज करने के लिए 9 दबाएँ।"' 
         : '"Thank you, details are recorded. If you would like to record a voice note, press 7. To submit your complaint now, press 9 or say confirm."')}
-7. Keep your spoken response to 1-2 calm, highly polite, reassuring sentences in ${langName}.
+7. Keep your spoken response to 1-2 calm, highly polite, reassuring sentences strictly in ${langName}.
 
 Respond in strict JSON:
 {
@@ -1080,19 +1461,17 @@ Respond in strict JSON:
 }`;
 
       const aiResponse = await runLLMGeneration({ prompt }) || "{}";
-      let parsed: any = {};
-      try {
-        parsed = JSON.parse(aiResponse);
-      } catch {
-        parsed = {};
-      }
+      const parsed: any = cleanAndParseJson(aiResponse) || {};
 
-      if (parsed.cause) updatedData.cause = parsed.cause;
-      if (parsed.location) updatedData.location = parsed.location;
-      if (parsed.when) updatedData.when = parsed.when;
-      if (parsed.item) updatedData.item = parsed.item;
+      if (parsed.cause && !updatedData.cause) updatedData.cause = parsed.cause;
+      if (parsed.location && !updatedData.location) updatedData.location = parsed.location;
+      if (parsed.when && !updatedData.when) updatedData.when = parsed.when;
+      if (parsed.item && !updatedData.item) updatedData.item = parsed.item;
 
-      const hasAllDetails = parsed.hasRequiredDetails || (updatedData.cause && updatedData.location && updatedData.when);
+      const hasAllDetails = parsed.hasRequiredDetails || 
+        analysis.hasAllRequired || 
+        analysis.isExhaustedOrConfirming || 
+        (updatedData.cause && updatedData.location);
 
       if (hasAllDetails) {
         nextStep = "press_7_prompt";
@@ -1103,13 +1482,13 @@ Respond in strict JSON:
         )) {
           replyText = parsed.spokenResponse;
         } else {
-          if (isKannada) {
-            replyText = `ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ತಮ್ಮ ದೂರನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗಿದೆ. ತಾವು ಸ್ವತಃ ಧ್ವನಿ ಸಂದೇಶ ರೆಕಾರ್ಡ್ ಮಾಡಲು ಬಯಸಿದರೆ 7 ಒತ್ತಿ, ಅಥವಾ ದೂರನ್ನು ಸಲ್ಲಿಸಲು 9 ಒತ್ತಿ.`;
-          } else if (isHindi) {
-            replyText = `धन्यवाद। हमने विवरण नोट कर लिया है। यदि आप अपनी आवाज़ में संदेश रिकॉर्ड करना चाहते हैं तो 7 दबाएँ, अथवा शिकायत दर्ज करने के लिए 9 दबाएँ।`;
-          } else {
-            replyText = `Thank you. We have recorded your concern. If you would like to record a voice note, press 7. To submit your complaint, press 9 or say confirm.`;
-          }
+          replyText = analysis.suggestedPrompt || (
+            isKannada
+              ? `ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ತಮ್ಮ ದೂರನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗಿದೆ. ತಾವು ಸ್ವತಃ ಧ್ವನಿ ಸಂದೇಶ ರೆಕಾರ್ಡ್ ಮಾಡಲು ಬಯಸಿದರೆ 7 ಒತ್ತಿ, ಅಥವಾ ದೂರನ್ನು ಸಲ್ಲಿಸಲು 9 ಒತ್ತಿ.`
+              : (isHindi 
+                  ? `धन्यवाद। हमने विवरण नोट कर लिया है। यदि आप अपनी आवाज़ में संदेश रिकॉर्ड करना चाहते हैं तो 7 दबाएँ, अथवा शिकायत दर्ज करने के लिए 9 दबाएँ।`
+                  : `Thank you. We have recorded your concern. If you would like to record a voice note, press 7. To submit your complaint, press 9 or say confirm.`)
+          );
         }
       } else {
         nextStep = "collecting_info";
@@ -1120,16 +1499,12 @@ Respond in strict JSON:
         )) {
           replyText = parsed.spokenResponse;
         } else {
-          replyText = (
-            isKannada 
-              ? "ದಯವಿಟ್ಟು ಈ ಘಟನೆ ನಡೆದ ಸ್ಥಳ, ಹೋಟೆಲ್ ಅಥವಾ ಅಂಗಡಿಯ ಹೆಸರನ್ನು ಸವಿನಯವಾಗಿ ತಿಳಿಸುವಿರಾ?" 
-              : (isHindi ? "कृपया उस स्थान या रेस्टोरेंट का नाम बताएं जहाँ यह समस्या हुई।" : "Could you please let us know the location or restaurant name?")
-          );
+          replyText = analysis.suggestedPrompt;
         }
       }
     }
 
-    // Attempt to generate TTS (currently returns null, relying on browser TTS)
+    // Generate high-fidelity TTS audio via Sarvam AI
     const audioUrl = await generateTTSAudioUrl(replyText, currentLang);
 
     res.json({
@@ -1149,9 +1524,19 @@ Respond in strict JSON:
 
 // API: Sarvam AI Text-to-Speech (TTS)
 app.post("/api/tts", async (req, res) => {
-  // Groq does not currently support TTS. 
-  // We return a 501 Not Implemented so the frontend gracefully falls back to browser SpeechSynthesis.
-  res.status(501).json({ error: "Groq TTS not available. Defaulting to browser Speech Synthesis." });
+  try {
+    const { text, language = "kn-IN" } = req.body;
+    if (!text || !text.trim()) {
+      return res.status(400).json({ error: "Text is required" });
+    }
+    const audioUrl = await generateSarvamTTS(text, language);
+    if (audioUrl) {
+      return res.json({ audioUrl });
+    }
+    return res.status(503).json({ error: "Sarvam AI TTS not available" });
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || "TTS failed" });
+  }
 });
 
 // Helper to detect Whisper hallucinations on silent/quiet audio clips
