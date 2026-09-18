@@ -141,7 +141,7 @@ async function runLLMGeneration({
         body: JSON.stringify({
           model: model,
           messages: formattedMessages,
-          max_tokens: 800,
+          max_tokens: 1500,
           temperature: 0.2,
         }),
       }, 9000);
@@ -1359,7 +1359,32 @@ ${updatedData.audioNoteUrl ? `**Voice Note Attached (MP3):** [Play Voice Evidenc
       if (analysis.item && !updatedData.item) updatedData.item = analysis.item;
       if (analysis.owner && !updatedData.owner) updatedData.owner = analysis.owner;
 
-      const prompt = `You are a calm, gentle, highly empathetic, and polite IVR Phone Agent for VoxAssist Consumer Food Safety Helpline.
+      // Check if user is asking an informational question vs reporting an incident
+      const isInformational = analysis.isInformationalInquiry || /^(what|how|why|who|explain|tell|fssai|rules|law|information|hello|hi|help|ಏನು|ಹೇಗೆ|ಯಾಕೆ|ಯಾರು|ತಿಳಿಸಿ|ಹೇಳಿ|ಬಗ್ಗೆ|ನಮಸ್ಕಾರ|ಸಹಾಯ|क्या|कैसे|बताओ|जानकारी|नमस्ते)/i.test(message || "");
+
+      let prompt = "";
+      if (isInformational) {
+        prompt = `You are a calm, authoritative, helpful, and polite IVR Phone Assistant for the Food Safety & Standards Inspection Authority.
+Citizen just asked: "${message}"
+Target Language: ${langName} (${currentLang}).
+
+INSTRUCTIONS:
+1. Answer the question directly, accurately, and politely in 2-3 spoken sentences strictly in ${langName}.
+2. If language is Kannada (${isKannada ? 'YES' : 'NO'}), EVERY SINGLE WORD must be in Kannada script (ಕನ್ನಡ ಲಿಪಿ). If Hindi (${isHindi ? 'YES' : 'NO'}), EVERY SINGLE WORD must be in Hindi script.
+3. DO NOT ask for incident details (where/when) since the user asked an informational question.
+4. End by politely asking if they need more information or want to report an issue.
+
+Respond in strict JSON:
+{
+  "cause": "",
+  "location": "",
+  "when": "",
+  "item": "",
+  "spokenResponse": "2-3 polite, direct informative sentences in ${langName}",
+  "hasRequiredDetails": false
+}`;
+      } else {
+        prompt = `You are a calm, gentle, highly empathetic, and polite IVR Phone Agent for VoxAssist Consumer Food Safety Helpline.
 User profile: Name: ${profile?.name || "Caller"}, Phone: ${profile?.phone || "On File"}, Location: ${profile?.location || "Not given"}.
 Currently known details from memory:
 - Cause: ${updatedData.cause || "Unknown"}
@@ -1400,6 +1425,7 @@ Respond in strict JSON:
   "spokenResponse": "1-2 highly polite sentences to speak to the caller strictly in ${langName}",
   "hasRequiredDetails": true/false
 }`;
+      }
 
       const aiResponse = await runLLMGeneration({ prompt }) || "{}";
       const parsed: any = cleanAndParseJson(aiResponse) || {};

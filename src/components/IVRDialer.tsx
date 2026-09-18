@@ -352,10 +352,20 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     text: string, 
     audioUrl?: string, 
     targetLang?: string,
-    onFinish?: () => void
+    onFinish?: () => void,
+    shouldStartListening: boolean = true
   ) => {
     stopSpeechOnly();
     clearSilenceTimers();
+
+    // Mute mic recognition while AI is speaking so it doesn't hear itself
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.abort();
+      } catch {}
+      setIsListening(false);
+    }
+
     const effectiveLang = targetLang || languageRef.current;
     const cleanPrompt = stripEmojis(text);
     if (!cleanPrompt) {
@@ -369,7 +379,9 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
     const handleSpeechEnd = () => {
       setIsIvrSpeaking(false);
-      startUserListening();
+      if (shouldStartListening && callActive && !isRecordingNote && !greetingCancelRef.current) {
+        startUserListening();
+      }
       if (onFinish) {
         onFinish();
       } else {
@@ -578,7 +590,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       await new Promise<void>((resolve) => {
         speakIVR(opt.text, undefined, opt.lang, () => {
           resolve();
-        });
+        }, false);
       });
 
       // Brief 200ms cadence between language options
@@ -588,6 +600,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     }
 
     if (!greetingCancelRef.current) {
+      startUserListening();
       startSilenceWatch();
     }
   };
