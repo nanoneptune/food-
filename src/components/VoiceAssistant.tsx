@@ -62,6 +62,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const transcriptRef = useRef<string>('');
+  const accumulatedFinalRef = useRef<string>('');
   const sessionPrefixRef = useRef<string>('');
   const activeAudioRef = useRef<HTMLAudioElement | null>(null);
   const silenceTimerRef = useRef<any>(null);
@@ -322,23 +323,29 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         };
 
         recognition.onresult = (event: any) => {
-          let finalTranscript = '';
-          let interimTranscript = '';
+          let finalChunk = '';
+          let interimChunk = '';
           
-          for (let i = 0; i < event.results.length; ++i) {
-            if (event.results[i].isFinal) {
-              finalTranscript += event.results[i][0].transcript + ' ';
-            } else {
-              interimTranscript += event.results[i][0].transcript;
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            const item = event.results[i];
+            if (item && item[0]) {
+              if (item.isFinal) {
+                finalChunk += item[0].transcript + ' ';
+              } else {
+                interimChunk += item[0].transcript;
+              }
             }
           }
 
-          const fullText = (finalTranscript + interimTranscript).trim();
-          const cleanText = mergeTranscripts(sessionPrefixRef.current, fullText);
+          if (finalChunk) {
+            accumulatedFinalRef.current = cleanSpeechTranscript(accumulatedFinalRef.current + ' ' + finalChunk);
+          }
 
-          if (cleanText) {
-            transcriptRef.current = cleanText;
-            setTranscript(cleanText);
+          const combined = cleanSpeechTranscript((accumulatedFinalRef.current + ' ' + interimChunk).trim());
+
+          if (combined) {
+            transcriptRef.current = combined;
+            setTranscript(combined);
             hasSpokenRef.current = true;
             lastSoundTimeRef.current = Date.now();
 
@@ -347,7 +354,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               stopSpeaking();
             }
 
-            // Silence Detection: After natural silence after speech, auto send!
+            // Silence Detection: After natural pause (3.5 seconds of silence) after speech, auto send
             if (silenceTimerRef.current) {
               clearTimeout(silenceTimerRef.current);
             }
@@ -355,7 +362,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
               if (isListeningRef.current && transcriptRef.current.trim()) {
                 stopListeningAndSend();
               }
-            }, 2600);
+            }, 3500);
           }
         };
 
@@ -363,17 +370,13 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
           console.warn('Browser speech recognition notice:', event.error);
           if (event.error === 'not-allowed') {
             setMicError("Microphone access blocked in browser. Please enable permissions.");
+            updateListeningState(false);
           }
         };
 
         recognition.onend = async () => {
           if (isListeningRef.current) {
-            // Chrome abruptly ends recognition when it detects a pause or no speech.
-            // Accumulate cleanly without duplicating words across restarts.
-            const capturedText = transcriptRef.current?.trim();
-            if (capturedText) {
-              sessionPrefixRef.current = capturedText;
-            }
+            // Keep speech recognition continuously running while user is in active speaking mode
             try {
               recognition.start();
             } catch {}
@@ -423,15 +426,25 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
       const lowerPrefix = langPrefix.toLowerCase();
       
-      // 1. Google voice specifically for language (e.g. Google ಕನ್ನಡ, Google हिन्दी, Google English)
+      // Priority 1: Microsoft Edge Natural Voice (e.g. Microsoft Gagan/Sapna - Kannada, Swara/Madhur - Hindi, Neerja/Prabhat - English)
       let matchedVoice = availableVoices.find(v => {
         const vLang = v.lang.toLowerCase().replace('_', '-');
         const vName = v.name.toLowerCase();
-        return (vLang.startsWith(lowerPrefix) || vName.includes(lang.toLowerCase())) && 
-               (vName.includes('google') || vName.includes('natural'));
+        const matchesLang = vLang.startsWith(lowerPrefix) || vName.includes(lowerPrefix) || vName.includes(lang.toLowerCase());
+        return matchesLang && (vName.includes('microsoft') || vName.includes('edge') || vName.includes('natural'));
       });
 
-      // 2. Any voice matching language prefix (kn, hi, en)
+      // Priority 2: Google / Chrome voices for language
+      if (!matchedVoice) {
+        matchedVoice = availableVoices.find(v => {
+          const vLang = v.lang.toLowerCase().replace('_', '-');
+          const vName = v.name.toLowerCase();
+          const matchesLang = vLang.startsWith(lowerPrefix) || vName.includes(lowerPrefix) || vName.includes(lang.toLowerCase());
+          return matchesLang && vName.includes('google');
+        });
+      }
+
+      // Priority 3: Any voice matching language prefix (kn, hi, en)
       if (!matchedVoice) {
         matchedVoice = availableVoices.find(v => {
           const vLang = v.lang.toLowerCase().replace('_', '-');
@@ -568,6 +581,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
 
     const browserCaptured = transcriptRef.current.trim();
+    accumulatedFinalRef.current = '';
     
     // 1ST PRIORITY: Free native Browser Web Speech API (Chrome/Edge/Safari/Android/Kotlin-like)
     if (browserCaptured && !isHallucinatedText(browserCaptured)) {
@@ -608,6 +622,7 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
     }
     setTranscript('');
     transcriptRef.current = '';
+    accumulatedFinalRef.current = '';
     sessionPrefixRef.current = '';
     updateListeningState(true);
     

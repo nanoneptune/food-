@@ -9,7 +9,6 @@ import dotenv from "dotenv";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { PassThrough } from "stream";
-import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
@@ -71,21 +70,6 @@ async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 1200
   }
 }
 
-// Lazy-initialized Gemini Client
-let geminiClient: GoogleGenAI | null = null;
-function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = (process.env.GEMINI_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
-  if (!apiKey) return null;
-  if (!geminiClient) {
-    try {
-      geminiClient = new GoogleGenAI({ apiKey });
-    } catch (e: any) {
-      console.warn("Could not initialize GoogleGenAI client:", e?.message);
-    }
-  }
-  return geminiClient;
-}
-
 // Robust JSON Extractor & Parser (handles markdown wraps & conversational commentary)
 function cleanAndParseJson(text: string): any {
   if (!text) return null;
@@ -106,7 +90,7 @@ function cleanAndParseJson(text: string): any {
   return null;
 }
 
-// Universal Fast & Resilient LLM Invocation Helper (Gemini + Groq + OpenAI)
+// 100% Groq Exclusively for LLM Generation (Groq Llama 3.3 70B & Llama 3.1 8B)
 async function runLLMGeneration({
   system,
   prompt,
@@ -116,116 +100,65 @@ async function runLLMGeneration({
   prompt?: string;
   messages?: any[];
 }): Promise<string> {
-  // 1. Google Gemini via @google/genai
-  const gemini = getGeminiClient();
-  if (gemini) {
-    try {
-      const contents: any[] = [];
-      if (messages && messages.length > 0) {
-        for (const m of messages) {
-          if (m.role === 'system') continue;
-          contents.push({
-            role: m.role === 'assistant' ? 'model' : 'user',
-            parts: [{ text: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }]
-          });
-        }
-      } else if (prompt) {
-        contents.push({
-          role: 'user',
-          parts: [{ text: prompt }]
-        });
-      }
+  const groqKey = (process.env.GROQ_API_KEY || "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").replace(/["'\r\n ]/g, "").trim();
 
-      if (contents.length > 0) {
-        const res = await gemini.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents,
-          config: system ? { systemInstruction: system } : undefined,
-        });
-
-        const text = res?.text;
-        if (text && text.trim()) {
-          return text.trim();
-        }
-      }
-    } catch (gErr: any) {
-      console.warn("Gemini generation notice:", gErr?.message);
-    }
+  if (!groqKey || groqKey === "YOUR_GROQ_API_KEY") {
+    console.error("[Groq Error] GROQ_API_KEY is not configured in environment");
+    return "";
   }
 
-  // 2. Groq Fast LLM Inference (llama-3.3-70b-versatile / llama-3.1-8b-instant)
-  const groqKey = (process.env.GROQ_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
   const groqModels = [
     "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant"
+    "llama-3.1-8b-instant",
+    "mixtral-8x7b-32768",
+    "llama3-70b-8192",
+    "llama3-8b-8192"
   ];
 
   let formattedMessages = messages && messages.length > 0
-    ? messages
+    ? messages.map((m: any) => ({
+        role: m.role === 'model' ? 'assistant' : m.role,
+        content: typeof m.content === 'string' ? m.content : (typeof m.text === 'string' ? m.text : JSON.stringify(m.content || ''))
+      }))
     : [
         ...(system ? [{ role: "system", content: system }] : []),
         { role: "user", content: prompt || "" }
       ];
 
-  if (system && messages && messages.length > 0 && messages[0]?.role !== "system") {
-    formattedMessages = [{ role: "system", content: system }, ...messages];
+  if (system && messages && messages.length > 0 && formattedMessages[0]?.role !== "system") {
+    formattedMessages = [{ role: "system", content: system }, ...formattedMessages];
   }
 
-  if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
-    for (const model of groqModels) {
-      try {
-        const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${groqKey}`,
-          },
-          body: JSON.stringify({
-            model: model,
-            messages: formattedMessages,
-            max_tokens: 800,
-          }),
-        }, 8000);
-
-        if (groqRes.ok) {
-          const data: any = await groqRes.json();
-          const reply = data?.choices?.[0]?.message?.content;
-          if (reply && reply.trim()) {
-            return reply.trim();
-          }
-        }
-      } catch (e: any) {
-        console.warn(`Groq API fallback notice for ${model}:`, e?.message);
-      }
-    }
-  }
-
-  // 3. OpenAI API (if configured)
-  const openAIKey = (process.env.OPENAI_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
-  if (openAIKey && openAIKey.startsWith("sk-")) {
+  for (const model of groqModels) {
     try {
-      const openAiRes = await fetchWithTimeout("https://api.openai.com/v1/chat/completions", {
+      console.log(`[Groq Request] Querying Groq with model: ${model}...`);
+      const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${openAIKey}`,
+          "Authorization": `Bearer ${groqKey}`,
         },
         body: JSON.stringify({
-          model: "gpt-4o-mini",
+          model: model,
           messages: formattedMessages,
           max_tokens: 800,
+          temperature: 0.2,
         }),
-      }, 8000);
+      }, 9000);
 
-      if (openAiRes.ok) {
-        const data: any = await openAiRes.json();
+      if (groqRes.ok) {
+        const data: any = await groqRes.json();
         const reply = data?.choices?.[0]?.message?.content;
         if (reply && reply.trim()) {
+          console.log(`[Groq Success] Model ${model} responded (${reply.length} chars)`);
           return reply.trim();
         }
+      } else {
+        const errTxt = await groqRes.text().catch(() => '');
+        console.warn(`Groq API returned status ${groqRes.status} for model ${model}:`, errTxt);
       }
     } catch (e: any) {
-      console.warn("OpenAI fallback notice:", e?.message);
+      console.warn(`Groq API attempt failed for ${model}:`, e?.message);
     }
   }
 
@@ -826,9 +759,10 @@ function analyzeCustomerWords(
     entities.isExhaustedOrConfirming = true;
   }
 
-  // 2. Check for informational inquiries (FSSAI laws, hygiene rules, licenses)
-  const infoRegex = /(fssai|license|licence|hygiene rule|inspection|penalty|fine|ನಿಯಮ|ಪರವಾನಗಿ|ದಂಡ|ತನಿಖೆ|ನಿಯಮಾವಳಿ|ಪ್ರಮಾಣಪತ್ರ|ನಿಯಮಗಳು|ಲೈಸೆನ್ಸ್|ನಿಯಮಾವಳಿಗಳು|कानून|नियम|लाइसेंस|जुर्माना|जांच प्रक्रिया)/i;
-  if (infoRegex.test(currentText) && !currentText.includes('ಹೋಟೆಲ್') && !currentText.includes('ದೂರು')) {
+  // 2. Check for informational inquiries (FSSAI laws, hygiene rules, licenses, general questions)
+  const infoRegex = /(fssai|license|licence|hygiene rule|inspection|penalty|fine|what is|how to|about|explain|details|information|ನಿಯಮ|ಪರವಾನಗಿ|ದಂಡ|ತನಿಖೆ|ನಿಯಮಾವಳಿ|ಪ್ರಮಾಣಪತ್ರ|ನಿಯಮಗಳು|ಲೈಸೆನ್ಸ್|ನಿಯಮಾವಳಿಗಳು|ತಿಳಿಸಿ|ಹೇಳಿ|ಏನು|ಹೇಗೆ|ಬಗ್ಗೆ|ಕಾನೂನು|ಯಾವ|कानून|नियम|लाइसेंस|जुर्माना|जांच प्रक्रिया|क्या है|बताइए|जानकारी)/i;
+  const complaintSpecificKeywords = /(ಉಪ್ಪು\s*ಜಾಸ್ತಿ|ಹುಳು|ಹುಳ|ಕೂದಲು|ಹಾಳಾಗಿದೆ|ಹಳಸಿದ|ವಾಂತಿ|ಹೊಟ್ಟೆ\s*ನೋವು|ಕೊಳಕು|ಕೃತಕ\s*ಬಣ್ಣ|ಕಲ್ಮಶ|ವಿಷಾಹಾರ|ವಿಷಪೂರಿತ|ಕೀಡಾ|ಬದಬೂ|spoiled|poisoning|dirty|vomiting|insect|dead cockroach)/i;
+  if (infoRegex.test(currentText) && !complaintSpecificKeywords.test(currentText)) {
     entities.isInformationalInquiry = true;
   }
 
@@ -1041,9 +975,11 @@ app.post("/api/chat", async (req, res) => {
       }
     }
 
+    const isInfoOrGeneral = analysis.isInformationalInquiry || /^(what|how|why|who|explain|tell|fssai|rules|law|information|hello|hi|help|ಏನು|ಹೇಗೆ|ಯಾಕೆ|ಯಾರು|ತಿಳಿಸಿ|ಹೇಳಿ|ಬಗ್ಗೆ|ನಮಸ್ಕಾರ|ಸಹಾಯ|क्या|कैसे|बताओ|जानकारी|नमस्ते)/i.test(queryText);
+
     const systemPrompt = `You are VoxAssist's expert AI Food Safety, Hygiene, and Standards Inspection Authority Assistant.
 You represent the Official Government Food Safety & Hygiene Consumer Grievance Portal.
-You are NOT a restaurant, food ordering service, or menu assistant. Do NOT offer menus or food ordering.
+You are powered directly by Groq AI. Always generate complete, accurate, high-quality responses.
 
 Citizen Profile:
 - Name: ${profile?.name || "Citizen"}
@@ -1060,28 +996,25 @@ CRITICAL LANGUAGE MANDATE:
 Every single word of your response MUST strictly be in ${targetLang}.
 If Kannada, write purely in Kannada script (ಕನ್ನಡ ಲಿಪಿ). If Hindi, write purely in Devanagari script (हिंदी). If English, write in English. Do NOT mix languages!
 
-SEMANTIC ANALYSIS OF CURRENT CONVERSATION STATE:
-- Identified Establishment / Location (WHERE): ${analysis.location || "Not yet stated"}
-- Incident Timing (WHEN): ${analysis.when || "Not yet stated"}
-- Cause / Violation (CAUSE): ${analysis.cause || "Not yet stated"}
-- Food Item: ${analysis.item || "Not yet stated"}
-- Outlet Owner: ${analysis.owner || "Not yet stated"}
-- Missing Required Fields: ${analysis.missingFields.join(", ") || "None (All details present)"}
-- Customer Exhaustion / Done Talking: ${analysis.isExhaustedOrConfirming ? "YES" : "NO"}
-- Informational / Legal Inquiry: ${analysis.isInformationalInquiry ? "YES" : "NO"}
+CONVERSATION CONTEXT & CLASSIFICATION:
+- Informational / Educational / General Inquiry: ${isInfoOrGeneral ? "YES" : "NO"}
+- Location Extracted: ${analysis.location || "None"}
+- Timing Extracted: ${analysis.when || "None"}
+- Cause Extracted: ${analysis.cause || "None"}
+- Customer Exhaustion / Ready to Submit: ${analysis.isExhaustedOrConfirming ? "YES" : "NO"}
 
-STRICT CONVERSATION & RESPONSE RULES:
-1. INFORMATIONAL QUESTIONS:
-   - If the citizen asks a question about food safety regulations, FSSAI licensing, hygiene inspection rules, adulteration testing, food safety laws, or penalties, answer directly, precisely, and accurately with statutory guidance in the requested language (${targetLang}).
-   - Always use polite, respectful honorifics in Kannada (ನಮಸ್ಕಾರ, ದಯವಿಟ್ಟು, ತಾವು, ತಮ್ಮ, ಸವಿನಯವಾಗಿ).
+CRITICAL RESPONSE RULES:
+1. INFORMATIONAL / GENERAL QUESTIONS (E.g. FSSAI, rules, standards, licenses, testing, general inquiries):
+   - Answer the question directly, thoroughly, and intelligently with statutory knowledge in ${targetLang}.
+   - DO NOT ask for incident details (e.g. do NOT ask "where did this incident happen?" or "which hotel?") unless the user is explicitly trying to report a specific spoiled food grievance.
+   - Be helpful, polite, and authoritative.
 
-2. COMPLAINT & GRIEVANCE REPORTING FLOW:
-   - NEVER repeat a question for any detail that is already known above!
-   - If the customer provided the missing details OR said that is all they know (Customer Exhaustion = YES) OR if WHERE, WHEN, and CAUSE are present:
-     Generate the official Food Safety Grievance Report using the Markdown structure below, and append COMPLAINT_DRAFT_REQUEST at the end.
-   - If any detail is missing, acknowledge what was already provided, and ask politely for ONLY the missing detail.
+2. COMPLAINT & GRIEVANCE REPORTING (Only when user reports spoiled food, restaurant violations, illness, contamination):
+   - If location, when, and cause are known OR user says that is all they know:
+     Generate the official Food Safety Grievance Report markdown format below and end with COMPLAINT_DRAFT_REQUEST.
+   - If details are missing, politely ask ONLY for the missing detail.
 
-HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
+MARKDOWN GRIEVANCE REPORT FORMAT (FOR COMPLAINTS ONLY):
 # 📋 Official Food Safety & Inspection Grievance Report
 > **Reference ID:** #FS-${Date.now().toString().slice(-6)} | **Authority:** Food Safety Inspection Division | **Priority:** Urgent | **Status:** Logged for Enforcement
 
@@ -1134,7 +1067,15 @@ HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
 
     // Intelligent context-aware fallback if LLM returned empty or repetitive response
     if (!responseText || responseText.trim().length < 5) {
-      if (analysis.hasAllRequired || analysis.isExhaustedOrConfirming) {
+      if (isInfoOrGeneral) {
+        if (targetLang === 'Kannada') {
+          responseText = `FSSAI (ಭಾರತೀಯ ಆಹಾರ ಸುರಕ್ಷತೆ ಮತ್ತು ಗುಣಮಟ್ಟ ಪ್ರಾಧಿಕಾರ - Food Safety and Standards Authority of India) ಭಾರತದಲ್ಲಿ ಆಹಾರದ ಸುರಕ್ಷತೆ ಮತ್ತು ಗುಣಮಟ್ಟವನ್ನು ನಿಯಂತ್ರಿಸುವ ಶಾಸನಬದ್ಧ ಪ್ರಾಧಿಕಾರವಾಗಿದೆ.\n\nಇದು ಆಹಾರ ತಯಾರಕರು, ಹೋಟೆಲ್‌ಗಳು ಮತ್ತು ವ್ಯಾಪಾರಿಗಳಿಗೆ ಕಡ್ಡಾಯ ಆಹಾರ ಪರವಾನಗಿ (FSSAI License) ಮತ್ತು ನೈರ್ಮಲ್ಯ ಮಾರ್ಗಸೂಚಿಗಳನ್ನು ಜಾರಿಗೊಳಿಸುತ್ತದೆ. ಯಾವುದೇ ಕಲಬೆರಕೆ ಅಥವಾ ಕಲುಷಿತ ಆಹಾರದ ವಿರುದ್ಧ ನಾಗರಿಕರು ಅಧಿಕೃತವಾಗಿ ದೂರು ಸಲ್ಲಿಸಬಹುದು.`;
+        } else if (targetLang === 'Hindi') {
+          responseText = `FSSAI (भारतीय खाद्य सुरक्षा और मानक प्राधिकरण - Food Safety and Standards Authority of India) भारत में खाद्य उत्पादों की गुणवत्ता और सुरक्षा को नियंत्रित करने वाला वैधानिक प्राधिकरण है।\n\nयह सभी खाद्य विक्रेताओं, होटलों और निर्माताओं के लिए स्वच्छता दिशानिर्देश और खाद्य लाइसेंस अनिवार्य करता है। उपभोक्ता किसी भी मिलावट या अस्वच्छ भोजन के खिलाफ शिकायत दर्ज कर सकते हैं।`;
+        } else {
+          responseText = `FSSAI (Food Safety and Standards Authority of India) is the apex statutory authority established under the Ministry of Health & Family Welfare to lay down science-based standards for food and regulate their manufacture, storage, distribution, and sale to ensure wholesome and safe food for human consumption.`;
+        }
+      } else if (analysis.hasAllRequired || analysis.isExhaustedOrConfirming) {
         const refId = `#FS-${Date.now().toString().slice(-6)}`;
         const loc = analysis.location || "ಹೋಟೆಲ್ / ಆಹಾರ ಮಳಿಗೆ";
         const tim = analysis.when || "ಇತ್ತೀಚೆಗೆ";
@@ -1149,7 +1090,7 @@ HIGHLY DESIGNED MARKDOWN FOOD SAFETY GRIEVANCE REPORT STRUCTURE:
           responseText = `Thank you ${profile?.name || ''}. Your food safety complaint has been formally registered. A Food Safety Officer (FSO) will conduct an inspection.\n\n# 📋 Official Food Safety & Inspection Grievance Report\n> **Reference ID:** ${refId} | **Authority:** Food Safety Inspection Division | **Priority:** Urgent | **Status:** Logged for Enforcement\n\n---\n\n### 📍 Incident & Inspection Summary\n| Parameter | Details |\n| :--- | :--- |\n| **Complainant Name** | ${profile?.name || "Valued Citizen"} |\n| **Contact Phone** | ${profile?.phone || "Registered Phone"} |\n| **Establishment / Location (WHERE)** | ${loc} |\n| **Incident Date & Time (WHEN)** | ${tim} |\n| **Target Food Product** | ${itm} |\n| **Violation / Contamination (CAUSE)** | ${cau} |\n| **Logged Timestamp** | ${new Date().toLocaleString()} |\n\nCOMPLAINT_DRAFT_REQUEST`;
         }
       } else {
-        responseText = analysis.suggestedPrompt;
+        responseText = analysis.suggestedPrompt || "ನಮಸ್ಕಾರ, ನಾವು ತಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಬಹುದು? (How can we assist you today?)";
       }
     }
 

@@ -271,7 +271,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     stopSpeechOnly();
   };
 
-  // Google Browser Web Speech API TTS (First Priority)
+  // Browser Web Speech API TTS (First Priority - Microsoft Edge Natural Voices & System Voices)
   const speakWithBrowserGoogle = (text: string, langCode: string, onEnd: () => void): boolean => {
     if (typeof window === 'undefined' || !window.speechSynthesis) return false;
     try {
@@ -289,14 +289,25 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       const prefix = langCode.slice(0, 2).toLowerCase();
       const voices = window.speechSynthesis.getVoices();
 
-      // Find best available voice on the device (prioritizing Google keyboard / Android / native voice)
+      // Priority 1: Microsoft Edge Natural Voice (e.g. Microsoft Gagan/Sapna Online (Natural) - Kannada, Swara/Madhur - Hindi, Neerja/Prabhat - English)
       let voiceMatch = voices.find(v => {
         const vLang = v.lang.toLowerCase().replace('_', '-');
         const vName = v.name.toLowerCase();
-        return (vLang.startsWith(prefix) || vName.includes(prefix)) && 
-               (vName.includes('google') || vName.includes('natural'));
+        const matchesLang = vLang.startsWith(prefix) || vName.includes(prefix);
+        return matchesLang && (vName.includes('microsoft') || vName.includes('edge') || vName.includes('natural'));
       });
 
+      // Priority 2: Google or Chromium native voice
+      if (!voiceMatch) {
+        voiceMatch = voices.find(v => {
+          const vLang = v.lang.toLowerCase().replace('_', '-');
+          const vName = v.name.toLowerCase();
+          const matchesLang = vLang.startsWith(prefix) || vName.includes(prefix);
+          return matchesLang && vName.includes('google');
+        });
+      }
+
+      // Priority 3: Any voice matching target language prefix (kn, hi, en)
       if (!voiceMatch) {
         voiceMatch = voices.find(v => {
           const vLang = v.lang.toLowerCase().replace('_', '-');
@@ -313,7 +324,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
       const utterance = new SpeechSynthesisUtterance(cleanText);
       utterance.lang = langCode;
-      utterance.rate = 1.35; // Authentic clear cadence
+      utterance.rate = 1.25; // Authentic clear cadence
       utterance.pitch = 1.0;
       if (voiceMatch) utterance.voice = voiceMatch;
 
@@ -464,28 +475,35 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
         setIsListening(true);
       };
 
+      let accumulatedFinal = '';
       recognition.onresult = (event: any) => {
         clearSilenceTimers();
 
-        let finalTranscript = '';
-        let interimTranscript = '';
+        let finalChunk = '';
+        let interimChunk = '';
 
-        for (let i = 0; i < event.results.length; ++i) {
-          if (event.results[i].isFinal) {
-            finalTranscript += event.results[i][0].transcript + ' ';
-          } else {
-            interimTranscript += event.results[i][0].transcript;
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          const item = event.results[i];
+          if (item && item[0]) {
+            if (item.isFinal) {
+              finalChunk += item[0].transcript + ' ';
+            } else {
+              interimChunk += item[0].transcript;
+            }
           }
         }
 
-        const rawSpoken = (finalTranscript + interimTranscript).trim();
-        const cleanSpoken = cleanSpeechTranscript(rawSpoken);
+        if (finalChunk) {
+          accumulatedFinal = cleanSpeechTranscript(accumulatedFinal + ' ' + finalChunk);
+        }
 
-        if (cleanSpoken) {
-          localCapturedSpoken = cleanSpoken;
-          setLastCallerSpoken(cleanSpoken);
+        const rawSpoken = cleanSpeechTranscript((accumulatedFinal + ' ' + interimChunk).trim());
+
+        if (rawSpoken) {
+          localCapturedSpoken = rawSpoken;
+          setLastCallerSpoken(rawSpoken);
           
-          // Wait for natural 2.2s silence before concluding user has finished speaking
+          // Wait for natural 3.5s pause before concluding user has finished speaking
           if (speechSilenceTimerRef.current) {
             clearTimeout(speechSilenceTimerRef.current);
           }
@@ -495,13 +513,14 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
               processingSpeechRef.current = true;
               const speechToProcess = localCapturedSpoken;
               localCapturedSpoken = '';
+              accumulatedFinal = '';
               try {
                 recognition.abort();
               } catch {}
               setIsListening(false);
               handleCallerSpeech(speechToProcess);
             }
-          }, 2200);
+          }, 3500);
         }
       };
 
