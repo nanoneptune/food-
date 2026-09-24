@@ -323,25 +323,29 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
         };
 
         recognition.onresult = (event: any) => {
-          let finalChunk = '';
-          let interimChunk = '';
+          let currentFinal = '';
+          let currentInterim = '';
           
           for (let i = event.resultIndex; i < event.results.length; ++i) {
             const item = event.results[i];
             if (item && item[0]) {
               if (item.isFinal) {
-                finalChunk += item[0].transcript + ' ';
+                currentFinal += item[0].transcript + ' ';
               } else {
-                interimChunk += item[0].transcript;
+                currentInterim += item[0].transcript;
               }
             }
           }
 
-          if (finalChunk) {
-            accumulatedFinalRef.current = cleanSpeechTranscript(accumulatedFinalRef.current + ' ' + finalChunk);
+          if (currentFinal) {
+            const cleanFinal = currentFinal.trim();
+            // Prevent duplicate appending of the exact same recognized chunk
+            if (!accumulatedFinalRef.current.includes(cleanFinal)) {
+              accumulatedFinalRef.current = cleanSpeechTranscript((accumulatedFinalRef.current + ' ' + cleanFinal).trim());
+            }
           }
 
-          const combined = cleanSpeechTranscript((accumulatedFinalRef.current + ' ' + interimChunk).trim());
+          const combined = cleanSpeechTranscript((accumulatedFinalRef.current + ' ' + currentInterim).trim());
 
           if (combined) {
             transcriptRef.current = combined;
