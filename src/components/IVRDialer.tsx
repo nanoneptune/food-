@@ -36,6 +36,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   // Call States
   const [callActive, setCallActive] = useState<boolean>(false);
   const [callDuration, setCallDuration] = useState<number>(0);
+  const callActiveRef = useRef<boolean>(false);
 
   // IVR Dialogue State
   const [ivrStep, setIvrStep] = useState<string>('welcome');
@@ -379,7 +380,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
     const handleSpeechEnd = () => {
       setIsIvrSpeaking(false);
-      if (shouldStartListening && callActive && !isRecordingNote && !greetingCancelRef.current) {
+      if (shouldStartListening && callActiveRef.current && !isRecordingNote && !greetingCancelRef.current) {
         startUserListening();
       }
       if (onFinish) {
@@ -462,7 +463,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
 
   // Start continuous listening for caller voice (Google Browser Web Speech API 1st Priority)
   const startUserListening = () => {
-    if (!callActive || isRecordingNote) return;
+    if (!callActiveRef.current || isRecordingNote) return;
 
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SpeechRecognition) return;
@@ -506,7 +507,11 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
         }
 
         if (finalChunk) {
-          accumulatedFinal = cleanSpeechTranscript(accumulatedFinal + ' ' + finalChunk);
+          const cleanFinal = finalChunk.trim();
+          // Avoid duplicate appending if speech recognition re-emits identical final chunk
+          if (!accumulatedFinal.includes(cleanFinal)) {
+            accumulatedFinal = cleanSpeechTranscript((accumulatedFinal + ' ' + cleanFinal).trim());
+          }
         }
 
         const rawSpoken = cleanSpeechTranscript((accumulatedFinal + ' ' + interimChunk).trim());
@@ -515,7 +520,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
           localCapturedSpoken = rawSpoken;
           setLastCallerSpoken(rawSpoken);
           
-          // Wait for natural 3.5s pause before concluding user has finished speaking
+          // Wait for natural 2.5s pause before concluding user has finished speaking
           if (speechSilenceTimerRef.current) {
             clearTimeout(speechSilenceTimerRef.current);
           }
@@ -532,7 +537,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
               setIsListening(false);
               handleCallerSpeech(speechToProcess);
             }
-          }, 3500);
+          }, 2500);
         }
       };
 
@@ -554,14 +559,14 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
         }
 
         // Auto-restart if we are still in active listening mode
-        if (callActive && !isIvrSpeaking && !isRecordingNote && !greetingCancelRef.current && !processingSpeechRef.current) {
+        if (callActiveRef.current && !isIvrSpeaking && !isRecordingNote && !greetingCancelRef.current && !processingSpeechRef.current) {
           setTimeout(() => {
-            if (callActive && !isIvrSpeaking && !isRecordingNote && !greetingCancelRef.current && !processingSpeechRef.current) {
+            if (callActiveRef.current && !isIvrSpeaking && !isRecordingNote && !greetingCancelRef.current && !processingSpeechRef.current) {
               try {
                 recognition.start();
               } catch (e) {}
             }
-          }, 350);
+          }, 300);
         }
       };
 
@@ -572,15 +577,15 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     }
   };
 
-  // Play Language Prompts 1, 2, 3 instantly at 1.4X speed
+  // Play Language Prompts 1, 2, 3 instantly at natural fast cadence
   const playTrilingualGreeting = async () => {
     greetingCancelRef.current = false;
     clearSilenceTimers();
 
     const options = [
-      { text: "ನಮಸ್ಕಾರ, ಆಹಾರ ಸುರಕ್ಷತಾ ಮತ್ತು ನೈರ್ಮಲ್ಯ ಪರಿಶೀಲನೆ ಸಹಾಯವಾಣಿಗೆ ತಮಗೆ ಆದರದ ಸ್ವಾಗತ. ಕನ್ನಡಕ್ಕಾಗಿ 1 ಒತ್ತಿ.", lang: "kn-IN" },
-      { text: "खाद्य सुरक्षा एवं निरीक्षण हेल्पलाइन में आपका स्वागत है। हिंदी के लिए 2 दबाएँ।", lang: "hi-IN" },
-      { text: "Welcome to the Food Safety & Standards Inspection Authority Helpline. For English, press 3.", lang: "en-IN" }
+      { text: "ಆಹಾರ ಸುರಕ್ಷತಾ ಸಹಾಯವಾಣಿ. ಕನ್ನಡಕ್ಕಾಗಿ 1 ಒತ್ತಿ.", lang: "kn-IN" },
+      { text: "खाद्य सुरक्षा हेल्पलाइन। हिंदी के लिए 2 दबाएँ।", lang: "hi-IN" },
+      { text: "Food Safety Helpline. For English, press 3.", lang: "en-IN" }
     ];
 
     for (let i = 0; i < options.length; i++) {
@@ -593,9 +598,9 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
         }, false);
       });
 
-      // Brief 200ms cadence between language options
+      // Brief 150ms cadence between language options
       if (i < options.length - 1 && !greetingCancelRef.current) {
-        await new Promise((r) => setTimeout(r, 200));
+        await new Promise((r) => setTimeout(r, 150));
       }
     }
 
@@ -610,11 +615,23 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     getAudioContext();
     clearSilenceTimers();
     dialogueHistoryRef.current = [];
+    callActiveRef.current = true;
     setCallActive(true);
     setCallDuration(0);
     updateStep('welcome');
     updateCollectedData({});
     setAudioNoteUrl('');
+
+    // Pre-request microphone access immediately on call click so browser permissions are granted seamlessly
+    try {
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // Release immediate test stream
+        testStream.getTracks().forEach(t => t.stop());
+      }
+    } catch (micErr) {
+      console.warn("Pre-call microphone check notice:", micErr);
+    }
 
     // Timer
     if (callTimerRef.current) clearInterval(callTimerRef.current);
@@ -629,6 +646,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   // Hang Up Call
   const endCall = () => {
     greetingCancelRef.current = true;
+    callActiveRef.current = false;
     interruptSpeaking();
     clearSilenceTimers();
     dialogueHistoryRef.current = [];

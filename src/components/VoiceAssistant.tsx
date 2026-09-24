@@ -72,6 +72,8 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
   const vadIntervalRef = useRef<any>(null);
   const hasSpokenRef = useRef<boolean>(false);
   const lastSoundTimeRef = useRef<number>(0);
+  // High-performance response cache for repeated queries
+  const queryCacheRef = useRef<Map<string, { response: string; spokenText: string; audioUrl?: string; isComplaintDraft?: boolean; markdownReport?: string }>>(new Map());
 
   const updateListeningState = (val: boolean) => {
     isListeningRef.current = val;
@@ -721,6 +723,31 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
 
     const userTurnCount = messages.filter(m => m.sender === 'user').length + 1;
 
+    // Check local response cache for immediate fast return on repeated queries
+    const cacheKey = `${language}:${queryText.toLowerCase().trim()}`;
+    const cachedResponse = queryCacheRef.current.get(cacheKey);
+    if (cachedResponse && !complaintDraft) {
+      const assistantMsg: VoiceInteraction = { 
+        id: (Date.now() + 1).toString(), 
+        text: cachedResponse.response, 
+        sender: 'assistant', 
+        timestamp: Date.now(),
+        audioUrl: cachedResponse.audioUrl
+      };
+      setMessages(prev => [...prev, assistantMsg]);
+      speak(cachedResponse.spokenText || cachedResponse.response, cachedResponse.audioUrl, assistantMsg.id);
+      if (cachedResponse.isComplaintDraft) {
+        setComplaintDraft({
+          query: queryText,
+          markdownReport: cachedResponse.markdownReport || cachedResponse.response,
+          media: []
+        });
+      }
+      setIsLoading(false);
+      setTranscript('');
+      return;
+    }
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -748,6 +775,16 @@ export default function VoiceAssistant({ profile }: { profile: UserProfile }) {
       
       const assistantReply = data.response || "I have received your query. How else may I assist you?";
       const spokenVoiceText = data.spokenText || assistantReply;
+
+      // Store in memory cache
+      queryCacheRef.current.set(cacheKey, {
+        response: assistantReply,
+        spokenText: spokenVoiceText,
+        audioUrl: data.audioUrl || undefined,
+        isComplaintDraft: !!data.isComplaintDraft,
+        markdownReport: data.markdownReport
+      });
+
       const assistantMsg: VoiceInteraction = { 
         id: (Date.now() + 1).toString(), 
         text: assistantReply, 

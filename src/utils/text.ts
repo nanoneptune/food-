@@ -24,7 +24,7 @@ export function cleanSpeechTranscript(text: string): string {
   if (!text) return '';
   
   // 1. Normalize spaces and whitespace
-  const clean = text.replace(/\s+/g, ' ').trim();
+  let clean = text.replace(/\s+/g, ' ').trim();
   if (!clean) return '';
 
   // 2. Tokenize by spaces (preserves full Unicode characters for Kannada & Hindi)
@@ -47,12 +47,14 @@ export function cleanSpeechTranscript(text: string): string {
     deduplicatedWords.push(current);
   }
 
-  // 4. Remove consecutive duplicate phrases (phrase lengths 4, 3, 2)
+  // 4. Remove consecutive duplicate phrases of variable lengths (from phraseLen 10 down to 2)
   let words = deduplicatedWords;
-  for (let phraseLen = 4; phraseLen >= 2; phraseLen--) {
+  for (let phraseLen = 10; phraseLen >= 2; phraseLen--) {
     let changed = true;
-    while (changed) {
+    let iterations = 0;
+    while (changed && iterations < 15) {
       changed = false;
+      iterations++;
       if (words.length < phraseLen * 2) break;
       for (let i = 0; i <= words.length - phraseLen * 2; i++) {
         const phrase1 = words.slice(i, i + phraseLen).map(w => w.toLowerCase().replace(/^[.,!?;:()]+|[.,!?;:()]+$/g, '')).join(' ');
@@ -67,7 +69,30 @@ export function cleanSpeechTranscript(text: string): string {
     }
   }
 
-  return words.join(' ').trim();
+  const result = words.join(' ').trim();
+
+  // 5. Check if the string itself consists of two or three identical halves/thirds (e.g. "hello world hello world")
+  const wordsArr = result.split(' ');
+  const halfLen = Math.floor(wordsArr.length / 2);
+  if (halfLen >= 2 && wordsArr.length % 2 === 0) {
+    const firstHalf = wordsArr.slice(0, halfLen).join(' ').toLowerCase();
+    const secondHalf = wordsArr.slice(halfLen).join(' ').toLowerCase();
+    if (firstHalf === secondHalf) {
+      return wordsArr.slice(0, halfLen).join(' ').trim();
+    }
+  }
+
+  const thirdLen = Math.floor(wordsArr.length / 3);
+  if (thirdLen >= 2 && wordsArr.length % 3 === 0) {
+    const part1 = wordsArr.slice(0, thirdLen).join(' ').toLowerCase();
+    const part2 = wordsArr.slice(thirdLen, thirdLen * 2).join(' ').toLowerCase();
+    const part3 = wordsArr.slice(thirdLen * 2).join(' ').toLowerCase();
+    if (part1 === part2 && part2 === part3) {
+      return wordsArr.slice(0, thirdLen).join(' ').trim();
+    }
+  }
+
+  return result;
 }
 
 /**
