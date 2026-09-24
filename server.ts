@@ -680,7 +680,7 @@ function stripEmojis(text: string): string {
 
 // High-Fidelity Sarvam AI Text-to-Speech Engine
 async function generateSarvamTTS(text: string, language: string): Promise<string | null> {
-  const sarvamKey = (process.env.SARVAM_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
+  const sarvamKey = (process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW").replace(/["'\r\n ]/g, "").trim();
   if (!sarvamKey) return null;
 
   try {
@@ -1568,7 +1568,45 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
       }
     }
 
-    res.status(200).json({ transcript: "", error: "Could not transcribe audio using Groq." });
+    // Sarvam AI STT Fallback
+    const sarvamKey = (process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW").replace(/["'\r\n ]/g, "").trim();
+    if (sarvamKey) {
+      try {
+        const sForm = new FormData();
+        const audioBuffer = req.file.buffer;
+        const mime = req.file.mimetype || "audio/webm";
+        const fileObj = typeof File !== "undefined"
+          ? new File([audioBuffer], "voice.webm", { type: mime })
+          : new Blob([audioBuffer], { type: mime });
+
+        sForm.append("file", fileObj as any, "voice.webm");
+        let langCode = "kn-IN";
+        if (language === "Hindi" || language === "hi-IN") langCode = "hi-IN";
+        else if (language === "English" || language === "en-IN") langCode = "en-IN";
+        sForm.append("language_code", langCode);
+        sForm.append("model", "saarika:v2");
+
+        const sRes = await fetch("https://api.sarvam.ai/speech-to-text", {
+          method: "POST",
+          headers: {
+            "api-subscription-key": sarvamKey
+          },
+          body: sForm
+        });
+
+        if (sRes.ok) {
+          const sData: any = await sRes.json();
+          if (sData && sData.transcript && sData.transcript.trim()) {
+            console.log(`[STT Success] Sarvam AI transcribed (${language || 'kn-IN'}): "${sData.transcript.trim()}"`);
+            return res.json({ transcript: sData.transcript.trim(), provider: "sarvam-stt" });
+          }
+        }
+      } catch (sarvamSttErr: any) {
+        console.warn("Sarvam STT failed:", sarvamSttErr?.message);
+      }
+    }
+
+    res.status(200).json({ transcript: "", error: "Could not transcribe audio." });
   } catch (err: any) {
     console.error("STT endpoint error:", err);
     res.status(200).json({ transcript: "", error: err.message });
