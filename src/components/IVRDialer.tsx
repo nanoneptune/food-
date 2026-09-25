@@ -345,7 +345,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
     }
   };
 
-  // Play speech: Sarvam AI audioUrl -> Browser SpeechSynthesis -> Fallback /api/tts
+  // Play speech: server neural audioUrl -> Browser SpeechSynthesis -> /api/tts
   const speakIVR = async (
     text: string, 
     audioUrl?: string, 
@@ -397,7 +397,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
       }
     };
 
-    // 1ST PRIORITY: High-fidelity audioUrl from Sarvam AI
+    // 1ST PRIORITY: server-synthesised neural audio from /api/ivr/dialogue
     if (audioUrl) {
       try {
         if (!audioPlayerRef.current) {
@@ -483,7 +483,7 @@ export const IVRDialer: React.FC<IVRDialerProps> = ({ profile }) => {
   // ---------------------------------------------------------------------------
 
   const transcribeUtterance = async (audio: Blob, lang: VoiceLang): Promise<string> => {
-    // 1) Server speech-to-text (Groq Whisper large-v3 / Sarvam) with the
+    // 1) Server speech-to-text (Groq Whisper large-v3-turbo) with the
     //    language forced, so Kannada is never transcribed as English.
     try {
       const form = new FormData();

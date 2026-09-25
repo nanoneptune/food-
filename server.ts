@@ -6,56 +6,27 @@ import { createClient } from "@libsql/client";
 import Tesseract from "tesseract.js";
 import twilio from "twilio";
 import dotenv from "dotenv";
-import ffmpeg from "fluent-ffmpeg";
-import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 import { PassThrough } from "stream";
 
 dotenv.config();
 
-try {
-  if (ffmpegInstaller && ffmpegInstaller.path) {
-    ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-  }
-} catch (e) {
-  console.warn("FFmpeg path setup notice:", e);
-}
-
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-// Helper to convert WebM/audio buffer to WAV buffer for strict APIs (like Sarvam)
-async function convertWebmToWav(buffer: Buffer): Promise<Buffer> {
-  const os = await import("os");
-  const fs = await import("fs");
-  const path = await import("path");
-  const tmpIn = path.join(os.tmpdir(), `in_${Date.now()}_${Math.random().toString(36).slice(2)}.webm`);
-  const tmpOut = path.join(os.tmpdir(), `out_${Date.now()}_${Math.random().toString(36).slice(2)}.wav`);
-
-  await fs.promises.writeFile(tmpIn, buffer);
-  return new Promise((resolve, reject) => {
-    ffmpeg(tmpIn)
-      .toFormat("wav")
-      .audioChannels(1)
-      .audioFrequency(16000)
-      .on("end", async () => {
-        try {
-          const wavBuf = await fs.promises.readFile(tmpOut);
-          await fs.promises.unlink(tmpIn).catch(() => {});
-          await fs.promises.unlink(tmpOut).catch(() => {});
-          resolve(wavBuf);
-        } catch (e) {
-          reject(e);
-        }
-      })
-      .on("error", async (err) => {
-        await fs.promises.unlink(tmpIn).catch(() => {});
-        await fs.promises.unlink(tmpOut).catch(() => {});
-        reject(err);
-      })
-      .save(tmpOut);
-  });
+// Single source of truth for the Groq credential. No key is hard-coded in the
+// repository: set GROQ_API_KEY in .env (or the host environment).
+function getGroqKey(): string {
+  return (process.env.GROQ_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
 }
+
+// Model chains, verified live against this account's Groq catalog.
+// NOTE: llama-3.x and mixtral are NOT available on this key. Measured on a
+// Kannada JSON reply: qwen3.8 273 ms, gpt-oss-120b 799 ms, gpt-oss-20b 923 ms.
+// So the fastest model leads the chain on live voice turns.
+const GROQ_VOICE_MODELS = ["qwen/qwen3.8-27b", "openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+const GROQ_TEXT_MODELS = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"];
+const GROQ_STT_MODEL = "whisper-large-v3-turbo";
 
 // Helper for timeout-safe fetch
 async function fetchWithTimeout(url: string, options: any = {}, timeoutMs = 12000): Promise<Response> {
@@ -91,7 +62,7 @@ function cleanAndParseJson(text: string): any {
   return null;
 }
 
-// Primary LLM Generation powered by Sarvam AI (sarvam-105b-conversations) & Groq
+// LLM generation, powered by Groq
 async function runLLMGeneration({
   system,
   prompt,
@@ -112,8 +83,7 @@ async function runLLMGeneration({
   /** Override the per-provider request timeout */
   timeoutMs?: number;
 }): Promise<string> {
-  const sarvamKey = (process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW").replace(/["'\r\n ]/g, "").trim();
-  const groqKey = (process.env.GROQ_API_KEY || "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").replace(/["'\r\n ]/g, "").trim();
+  const groqKey = getGroqKey();
 
   let formattedMessages = messages && messages.length > 0
     ? messages.map((m: any) => ({
@@ -138,15 +108,18 @@ async function runLLMGeneration({
     requestBody.response_format = { type: "json_object" };
   }
 
-  const groqModels = preferFast
-    ? ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]
-    : ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"];
+  const groqModels = preferFast ? GROQ_VOICE_MODELS : GROQ_TEXT_MODELS;
 
   const callGroq = async (): Promise<string> => {
     if (!groqKey || groqKey === "YOUR_GROQ_API_KEY") return "";
-    for (const model of groqModels) {
+    for (let idx = 0; idx < groqModels.length; idx++) {
+      const model = groqModels[idx];
+      // On a live voice turn the FIRST model gets a short leash: qwen normally
+      // answers in ~270ms, so if it stalls we fail over quickly instead of
+      // making the caller listen to silence. Later attempts get a real budget.
+      const attemptTimeout = timeoutMs || (preferFast ? (idx === 0 ? 3500 : 9000) : 9000);
       try {
-        console.log(`[Groq Request] Querying Groq with model: ${model}...`);
+        console.log(`[Groq Request] Querying Groq with model: ${model} (timeout ${attemptTimeout}ms)...`);
         const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -154,7 +127,7 @@ async function runLLMGeneration({
             "Authorization": `Bearer ${groqKey}`,
           },
           body: JSON.stringify({ ...requestBody, model }),
-        }, timeoutMs || (preferFast ? 6000 : 9000));
+        }, attemptTimeout);
 
         if (groqRes.ok) {
           const data: any = await groqRes.json();
@@ -176,45 +149,10 @@ async function runLLMGeneration({
     return "";
   };
 
-  const callSarvam = async (): Promise<string> => {
-    if (!sarvamKey || sarvamKey === "YOUR_SARVAM_API_KEY") return "";
-    for (const model of ["sarvam-105b-conversations", "sarvam-105b"]) {
-      try {
-        console.log(`[Sarvam Chat] Querying Sarvam AI model: ${model}...`);
-        const sarvamRes = await fetchWithTimeout("https://api.sarvam.ai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "api-subscription-key": sarvamKey,
-          },
-          body: JSON.stringify({ ...requestBody, model }),
-        }, timeoutMs || (preferFast ? 6500 : 12000));
-
-        if (sarvamRes.ok) {
-          const data: any = await sarvamRes.json();
-          const reply = data?.choices?.[0]?.message?.content;
-          if (reply && reply.trim()) {
-            console.log(`[Sarvam Chat Success] Model ${model} responded (${reply.length} chars)`);
-            return reply.trim();
-          }
-        } else {
-          const errTxt = await sarvamRes.text().catch(() => '');
-          console.warn(`Sarvam Chat returned status ${sarvamRes.status} for model ${model}:`, errTxt);
-        }
-      } catch (e: any) {
-        console.warn(`Sarvam Chat attempt notice for ${model}:`, e?.message);
-      }
-    }
-    return "";
-  };
-
-  // Latency strategy: on a live voice turn we race the fastest provider first,
-  // and fall straight through to the other one instead of waiting on timeouts.
-  const chain = preferFast ? [callGroq, callSarvam] : [callSarvam, callGroq];
-  for (const attempt of chain) {
-    const reply = await attempt();
-    if (reply) return reply;
-  }
+  // Groq is the only LLM provider for this helpline.
+  void preferFast; // kept for call-site compatibility
+  const reply = await callGroq();
+  if (reply) return reply;
 
   return "";
 }
@@ -410,6 +348,44 @@ async function initDB() {
   }
 }
 initDB();
+
+// Startup provider check, so a missing or expired GROQ_API_KEY is impossible
+// to miss. The helpline needs Groq for both the LLM and speech-to-text.
+async function verifyGroqCredentials() {
+  const key = getGroqKey();
+  if (!key) {
+    console.warn("[Provider check] GROQ_API_KEY is not set - answers will come only from the stored knowledge base.");
+    return;
+  }
+  try {
+    const res = await fetchWithTimeout("https://api.groq.com/openai/v1/models", {
+      headers: { Authorization: `Bearer ${key}` },
+    }, 8000);
+    if (res.ok) {
+      console.log("[Provider check] GROQ_API_KEY is valid - LLM and speech-to-text are ready.");
+
+      // Also confirm the configured model IDs actually exist on THIS key, so a
+      // key from a different account/tier can never fail silently at call time.
+      const catalog: string[] = (await res.json())?.data?.map((m: any) => m.id) || [];
+      const wanted = [...new Set([...GROQ_VOICE_MODELS, ...GROQ_TEXT_MODELS, GROQ_STT_MODEL])];
+      const missing = wanted.filter((m) => !catalog.includes(m));
+      const usable = wanted.filter((m) => catalog.includes(m));
+      console.log(`[Provider check] ${catalog.length} models on this key; usable here: ${usable.join(", ") || "none"}`);
+      if (missing.length) {
+        console.warn(`[Provider check] NOT available on this key: ${missing.join(", ")} - update the model chains in server.ts.`);
+      }
+      if (!usable.length) {
+        console.warn("[Provider check] No configured model is available - the IVR will only answer from its knowledge base.");
+      }
+    } else {
+      const errTxt = await res.text().catch(() => "");
+      console.warn(`[Provider check] GROQ_API_KEY rejected with status ${res.status}. Update GROQ_API_KEY in .env. ${errTxt.slice(0, 200)}`);
+    }
+  } catch (e: any) {
+    console.warn("[Provider check] Could not reach Groq:", e?.message);
+  }
+}
+verifyGroqCredentials();
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -742,56 +718,6 @@ function stripEmojis(text: string): string {
     .trim();
 }
 
-// High-Fidelity Sarvam AI Text-to-Speech Engine
-async function generateSarvamTTS(text: string, language: string): Promise<string | null> {
-  const sarvamKey = (process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW").replace(/["'\r\n ]/g, "").trim();
-  if (!sarvamKey) return null;
-
-  try {
-    let targetLangCode = "kn-IN";
-    let speaker = "kavitha"; // Native Kannada female voice in bulbul:v3
-
-    const langStr = String(language || '').toLowerCase();
-    if (langStr.includes("hi")) {
-      targetLangCode = "hi-IN";
-      speaker = "priya"; // Native Hindi female voice in bulbul:v3
-    } else if (langStr.includes("en")) {
-      targetLangCode = "en-IN";
-      speaker = "aditya"; // Native Indian English voice in bulbul:v3
-    } else {
-      targetLangCode = "kn-IN";
-      speaker = "kavitha";
-    }
-
-    const clean = stripEmojis(text).slice(0, 500);
-    if (!clean) return null;
-
-    const res = await fetch("https://api.sarvam.ai/text-to-speech", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "api-subscription-key": sarvamKey,
-      },
-      body: JSON.stringify({
-        inputs: [clean],
-        target_language_code: targetLangCode,
-        speaker: speaker,
-        model: "bulbul:v3"
-      }),
-    });
-
-    if (res.ok) {
-      const data: any = await res.json();
-      if (data && data.audios && data.audios[0]) {
-        return `data:audio/wav;base64,${data.audios[0]}`;
-      }
-    }
-  } catch (err: any) {
-    console.warn("Sarvam TTS generation notice:", err?.message);
-  }
-  return null;
-}
-
 // ---------------------------------------------------------------------------
 // Microsoft Edge "Read Aloud" neural TTS - MIT licensed, no API key, genuinely
 // free, and it speaks Kannada, Hindi and Indian English natively. This is the
@@ -879,17 +805,13 @@ const ttsCache = new Map<string, string>();
 const TTS_CACHE_LIMIT = 120;
 
 // Helper to generate TTS audio data URI for instant playback.
-// Order: free Edge neural voice first, paid Sarvam only as a fallback.
+// The Edge neural voice is the one and only voice provider for this helpline.
 async function generateTTSAudioUrl(text: string, language: string): Promise<string | null> {
   const key = `${normalizeIvrLang(language)}::${String(text || "").slice(0, 500)}`;
   const cached = ttsCache.get(key);
   if (cached) return cached;
 
-  let url = await edgeTextToSpeech(text, language);
-  if (!url) {
-    console.warn("[TTS] Edge neural voice unavailable, trying Sarvam fallback...");
-    url = await generateSarvamTTS(text, language);
-  }
+  const url = await edgeTextToSpeech(text, language);
 
   if (url) {
     if (ttsCache.size >= TTS_CACHE_LIMIT) {
@@ -1326,7 +1248,7 @@ function overlapScore(tokens: string[], corpus: string): number {
  * learned Q&A cache, so the IVR can actually ANSWER a question instead of
  * only collecting a complaint.
  */
-async function getIvrKnowledgeContext(langCode: string, query: string, limit = 3): Promise<string> {
+async function getIvrKnowledgeContext(langCode: string, query: string, limit = 2): Promise<string> {
   try {
     const turso = getTurso();
     if (!turso) return "";
@@ -1346,7 +1268,7 @@ async function getIvrKnowledgeContext(langCode: string, query: string, limit = 3
       if (!content) continue;
       const score = overlapScore(tokens, `${row.name || ""} ${content}`) + 0.2;
       if (score > 0.3) {
-        scored.push({ score, text: `• DOCUMENT (${row.name || "reference"}): ${content.slice(0, 600)}` });
+        scored.push({ score, text: `• DOCUMENT (${row.name || "reference"}): ${content.slice(0, 400)}` });
       }
     }
 
@@ -1356,7 +1278,7 @@ async function getIvrKnowledgeContext(langCode: string, query: string, limit = 3
       if (!q || !a) continue;
       const score = overlapScore(tokens, q) + 0.25;
       if (score > 0.3) {
-        scored.push({ score, text: `• KNOWN ANSWER — Q: ${q} | A: ${a.slice(0, 500)}` });
+        scored.push({ score, text: `• KNOWN ANSWER — Q: ${q} | A: ${a.slice(0, 400)}` });
       }
     }
 
@@ -1949,10 +1871,14 @@ Respond in strict JSON: {"cause":"<cause or empty>","location":"<place or empty>
       }) || "{}";
       const parsed: any = cleanAndParseJson(aiResponse) || {};
 
-      if (parsed.cause && !updatedData.cause) updatedData.cause = parsed.cause;
-      if (parsed.location && !updatedData.location) updatedData.location = parsed.location;
-      if (parsed.when && !updatedData.when) updatedData.when = parsed.when;
-      if (parsed.item && !updatedData.item) updatedData.item = parsed.item;
+      // The model understands context far better than the keyword regexes, so
+      // its extraction wins: e.g. the regex stored "ರಾತ್ರಿ ಅನ್ನಪೂರ್ಣೇಶ್ವರಿ ಹೋಟೆಲ್"
+      // (sweeping in the word for "night") where the model returns just the
+      // outlet name. Only fall back to the regex value when the model is silent.
+      updatedData.cause = parsed.cause || updatedData.cause;
+      updatedData.location = parsed.location || updatedData.location;
+      updatedData.when = parsed.when || updatedData.when;
+      updatedData.item = parsed.item || updatedData.item;
 
       const hasAllDetails = parsed.hasRequiredDetails ||
         analysis.hasAllRequired ||
@@ -2146,7 +2072,7 @@ app.get("/api/admin/ivr-calls/:id", async (req, res) => {
   }
 });
 
-// API: Sarvam AI Text-to-Speech (TTS)
+// API: Neural Text-to-Speech (TTS)
 app.post("/api/tts", async (req, res) => {
   try {
     const { text, language = "kn-IN" } = req.body;
@@ -2196,7 +2122,7 @@ function isHallucinatedTranscript(text: string): boolean {
   return hallucinations.includes(clean);
 }
 
-// API: Robust Multi-Tier Speech-to-Text (STT) - Sarvam AI + Groq Whisper + OpenAI
+// API: Speech-to-Text (STT) - Groq Whisper large-v3-turbo
 app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
   const startedAt = Date.now();
   try {
@@ -2217,15 +2143,15 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
         ? new File([buffer], name, { type })
         : new Blob([buffer], { type });
 
-    // PRIMARY: Groq Whisper large-v3-turbo. It genuinely understands Kannada,
-    // Hindi and English, and the language is FORCED here - so the transcript can
-    // never silently drift to English the way the browser engine did.
-    const groqKey = (process.env.GROQ_API_KEY || "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").replace(/["'\r\n ]/g, "").trim();
-    if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
+    // Groq Whisper large-v3-turbo. It genuinely understands Kannada, Hindi and
+    // English, and the language is FORCED here - so the transcript can never
+    // silently drift to English the way the browser engine did.
+    const groqKey = getGroqKey();
+    if (groqKey) {
       try {
         const formData = new FormData();
         formData.append("file", makeFile(audioBuffer, mime, "voice.webm") as any, "voice.webm");
-        formData.append("model", "whisper-large-v3-turbo");
+        formData.append("model", GROQ_STT_MODEL);
         formData.append("language", whisperCode);
         formData.append("temperature", "0");
         formData.append("response_format", "json");
@@ -2260,51 +2186,7 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
       }
     }
 
-    // FALLBACK: Sarvam AI. It only accepts real 16 kHz mono WAV, so the webm
-    // recording is converted first (sending webm straight in silently failed).
-    const sarvamKey = (process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW").replace(/["'\r\n ]/g, "").trim();
-    if (sarvamKey) {
-      try {
-        let wavBuffer: Buffer = audioBuffer;
-        try {
-          wavBuffer = await convertWebmToWav(audioBuffer);
-        } catch (convErr: any) {
-          console.warn("WebM->WAV conversion notice:", convErr?.message);
-        }
-
-        const sForm = new FormData();
-        const usingWav = wavBuffer !== audioBuffer;
-        sForm.append("file", makeFile(wavBuffer, usingWav ? "audio/wav" : mime, usingWav ? "voice.wav" : "voice.webm") as any, usingWav ? "voice.wav" : "voice.webm");
-        sForm.append("language_code", langCode);
-        sForm.append("model", "saarika:v2");
-
-        const sRes = await fetchWithTimeout("https://api.sarvam.ai/speech-to-text", {
-          method: "POST",
-          headers: {
-            "api-subscription-key": sarvamKey,
-          },
-          body: sForm,
-        }, 12000);
-
-        if (sRes.ok) {
-          const sData: any = await sRes.json();
-          const text = String(sData?.transcript || "").trim();
-          if (text && !isHallucinatedTranscript(text)) {
-            console.log(`[STT] sarvam (${langCode}) in ${Date.now() - startedAt}ms: "${text}"`);
-            return res.json({
-              transcript: text,
-              provider: "sarvam-stt",
-              language: langCode,
-              ms: Date.now() - startedAt,
-            });
-          }
-        }
-      } catch (sarvamSttErr: any) {
-        console.warn("Sarvam STT failed:", sarvamSttErr?.message);
-      }
-    }
-
-    console.warn(`[STT] no transcript from any provider after ${Date.now() - startedAt}ms`);
+    console.warn(`[STT] Groq returned no usable transcript after ${Date.now() - startedAt}ms - the browser falls back to on-device recognition.`);
     res.status(200).json({ transcript: "", language: langCode, error: "Could not transcribe audio." });
   } catch (err: any) {
     console.error("STT endpoint error:", err);

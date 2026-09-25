@@ -1,53 +1,92 @@
-# Free Speech API Research & Final Decision — Kannada / Hindi / English
+# Speech stack decision — Kannada / Hindi / English
 
-**Research date:** 2026-09-08 · **Scope:** which speech engines are truly free for Kannada + Hindi + English, and the final choice for this app.
+**Updated:** 2026-09-25 (supersedes the 2026-09-08 version) · **Scope:** what actually powers listening and speaking in this app.
 
-## TL;DR (final decision, per user preference)
+> **Decision: Groq only for AI, Edge neural voices for speech output. Sarvam AI has been removed from the project entirely.**
 
-- **Speech-to-text (listening) = browser's built-in Web Speech API only.** It is free, installed in Chrome/Android, and most accurate in this app for all three languages (Kannada, Hindi, English). No server/cloud STT is used while the browser recognizer is available. The server `/api/stt` route remains solely as a last-resort fallback for browsers that do not support the Web Speech API at all (e.g. some desktop Firefox builds).
-- **Text-to-speech (speaking) = server neural TTS only, via `/api/tts`.** The browser's built-in `speechSynthesis` voice is deliberately disabled for speaking — it is only referenced to be *cancelled*. The **default provider is Microsoft Edge "Read Aloud" neural voices** (`msedge-tts`, MIT, no API key, no credits, fast): Kannada `kn-IN-Sapna/Gagan`, Hindi `hi-IN-Swara/Madhur`, English `en-IN-Neerja/Prabhat`. Sarvam AI is only used as an optional fallback if `SARVAM_API_KEY` is set and the free provider fails.
+## TL;DR
 
-## Research findings
-
-### 1. The proposed IndicConformer model does not exist as written
-
-- `ai4bharat/indicconformer_stt_kn_hybrid` — **not found on Hugging Face** (verified via the HF API).
-- What AI4Bharat actually publishes for Kannada IndicConformer: `ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large` — a **1.57 GB NVIDIA-NeMo `.nemo` checkpoint**, **gated** (HF login required), MIT license. It is **not** a `transformers.AutoModelForCTC` model and cannot run in Node/browser — it needs a Python + NeMo (+ GPU) service.
-- The newer `ai4bharat/indic-conformer-600m-multilingual` (ONNX) is also **gated/restricted** and uses custom code — not "100% free & unrestricted".
-- Conclusion: no IndicConformer variant runs inside this Node.js/Express app today. Any future adoption requires a separate Python + NeMo + GPU service.
-
-### 2. Free speech-to-text options compared
-
-| Option | Free? | Runs in this app? | Notes |
+| Job | Provider | Key needed | Notes |
 | --- | --- | --- | --- |
-| **Browser Web Speech API** | 100% free | **Yes (chosen)** | Built into Chrome/Edge/Android; supports kn-IN/hi-IN/en-IN; no key; audio stays on device |
-| Groq hosted Whisper (`whisper-large-v3-turbo`) | Free tier | Server fallback only | Requires `GROQ_API_KEY`; rate-limited |
-| OpenAI Whisper open weights (ONNX via Transformers.js) | Free/Apache-2.0 | Possible but heavy/slow on CPU; poor fit vs browser API | Rejected for STT |
-| Bhashini (Govt. of India) STT | Program/free | Needs registration + API key | Not "unrestricted" |
-| Sarvam / AssemblyAI / Google / Azure STT | Trials/paid | Paid | Rejected |
+| **Speaking (TTS)** | **Microsoft Edge "Read Aloud" neural voices** via the `msedge-tts` npm package (MIT) | **No key** | Speaks Kannada, Hindi and Indian English natively. MP3 24 kHz / 48 kbps. One WebSocket reused per voice. |
+| **Listening (STT)** | **Groq `whisper-large-v3-turbo`** | `GROQ_API_KEY` | Language is **forced** (`kn` / `hi` / `en`) and a domain hint is sent, so Kannada can never come back as English. |
+| **Listening — fallback** | **On-device Whisper** (`@xenova/transformers`, `Xenova/whisper-tiny`, WASM) in `src/lib/clientWhisper.ts` | none | Runs inside the browser. Used automatically when the cloud STT returns nothing, so the helpline keeps hearing callers with zero API credits. |
+| **LLM answers** | **Groq** (`qwen/qwen3.8-27b`, `openai/gpt-oss-20b`, `openai/gpt-oss-120b`) | `GROQ_API_KEY` | JSON mode, ~320 tokens on live voice turns. If the key is missing/expired the IVR still answers from `knowledge_base` / `qa_cache`. |
 
-### 3. Text-to-speech decision
+### Model catalog — verify before assuming
 
-- **Server neural TTS (`/api/tts` → Microsoft Edge neural voices via `msedge-tts`)** — natural, fast, 100% free (no token/credits) for Kannada/Hindi/English; used for all speaking. Optional fallback: Sarvam AI when `SARVAM_API_KEY` is set.
-- Browser `speechSynthesis` is only cancelled (never used to speak).
-- Optional: pre-generated audio URLs are played first when provided (fast playback), then server TTS.
+The account's Groq key exposes a **newer catalog**; the older `llama-3.x` and `mixtral` IDs are **not available** on it:
 
-## What changed in code
+```
+allam-2-7b                              meta-llama/llama-prompt-guard-2-22m
+canopylabs/orpheus-arabic-saudi          meta-llama/llama-prompt-guard-2-86m
+canopylabs/orpheus-v1-english            openai/gpt-oss-120b
+openai/gpt-oss-20b                       openai/gpt-oss-safeguard-20b
+qwen/qwen3.8-27b                         whisper-large-v3
+whisper-large-v3-turbo
+```
 
-- `server.ts`: removed the experimental offline-Whisper STT tier (added then reverted). `/api/stt` remains the emergency fallback (Groq when configured) for browsers without the Web Speech API; it still returns `detectedLanguage`.
-- `server.ts` `/api/tts`: new default provider `edgeTextToSpeech()` via the MIT-licensed `msedge-tts` npm package (Microsoft Edge Read Aloud voices, PCM WAV output, no key). Voice map: Kannada `kn-IN-SapnaNeural` (env `TTS_EDGE_VOICE_KN`), Hindi `hi-IN-SwaraNeural` (env `TTS_EDGE_VOICE_HI`), English `en-IN-NeerjaNeural` (env `TTS_EDGE_VOICE_EN`). Sarvam runs only when `TTS_PROVIDER=sarvam` or as fallback with a key. Dependency added to `package.json` (`msedge-tts ^2.0.7`) — run `npm install`.
-- `src/components/VoiceAssistant.tsx` & `src/components/IVRDialer.tsx`:
-  - Listening still uses the browser recognizer (primary) — unchanged.
-  - Speaking goes: pre-generated `audioUrl` (if any) → server `/api/tts` (Edge neural, free). All `speechSynthesis.speak()` calls and browser-voice code removed; the synthesis object is kept only for `cancel()` cleanup.
+**Measured latency on a Kannada JSON voice turn** (same prompt):
 
-## Speed & latency tuning (2026-09-08)
+| Model | Time | Notes |
+| --- | --- | --- |
+| `qwen/qwen3.8-27b` | **264–315 ms** | fastest, correct Kannada and JSON — leads the voice chain |
+| `openai/gpt-oss-120b` | ~800 ms | best-quality prose, used for longer non-voice text |
+| `openai/gpt-oss-20b` | ~765–923 ms | second fallback |
+| `allam-2-7b` | ~415 ms | unusable: fails JSON mode, loops/repeats |
 
-- **1.4× speaking speed**: all assistant audio plays at `playbackRate = 1.4` (pitch preserved) on both Talk and IVR screens.
-- **Cut the ~3 s delay** by reducing:
-  1. Post-speech silence auto-send: 3.2 s → **1.5 s** (Talk) and 2.5 s → **1.5 s** (web IVR) — this wait was a large part of the perceived delay.
-  2. TTS payload: Edge output switched from 24 kHz PCM WAV → **MP3 48 kbps** (~8× smaller transfer).
-  3. TTS connection overhead: one Edge WebSocket session is now **reused per voice** (new instances cost ~0.5 s handshake each request), serialized per voice.
-  4. LLM latency: default Groq model order now starts with the fast `llama-3.3-70b-versatile`; pin `GROQ_MODEL=openai/gpt-oss-120b` if accuracy matters more than speed.
-- Responses include the correct audio MIME (`audio/mpeg` for Edge mp3, `audio/wav` for Sarvam).
+Model chains live in `GROQ_VOICE_MODELS` / `GROQ_TEXT_MODELS` / `GROQ_STT_MODEL` in `server.ts`. The boot check prints which of them the current key actually supports, so a key from a different tier can never fail silently.
 
-Sources: [HF API model list (ai4bharat IndicConformer)](https://huggingface.co/api/models?author=ai4bharat&search=indicconformer) · [HF Kannada IndicConformer repo](https://huggingface.co/ai4bharat/indicconformer_stt_kn_hybrid_ctc_rnnt_large) · [HF multilingual ONNX IndicConformer (restricted)](https://huggingface.co/ai4bharat/indic-conformer-600m-multilingual) · [Xenova/whisper-small (Apache-2.0, ONNX)](https://huggingface.co/Xenova/whisper-small) · [models.ai4bharat.org](https://models.ai4bharat.org/)
+### Latency protection
+
+On a live voice turn the **first** model gets a short leash (3500 ms) and later attempts get 9000 ms. A stalled first model therefore costs ~3.5 s instead of 6 s — this alone took one measured turn from 9.4 s down to 2.6 s.
+
+## Why Sarvam was removed
+
+- The account key returned **HTTP 402 `insufficient_quota_error`** — chat, TTS and STT all failed.
+- Because the failures were silent, they looked like speech-recognition bugs (Kannada transcribed as English, no audio, slow replies).
+- Every Sarvam capability now has a working replacement: TTS → Edge neural (free, no key), STT → Groq Whisper (same key as the LLM).
+
+## Why the browser Web Speech API is NOT used for listening
+
+`recognition.lang = 'kn-IN'` is accepted but **silently ignored** on desktop Chrome, which falls back to the device language (English). That was the original cause of "I pressed 1 for Kannada but it hears English". The browser recogniser has therefore been removed from the dispatch path entirely.
+
+## Voice map (Edge neural)
+
+| Language | Voice | Override env var |
+| --- | --- | --- |
+| Kannada `kn-IN` | `kn-IN-SapnaNeural` | `TTS_EDGE_VOICE_KN` |
+| Hindi `hi-IN` | `hi-IN-SwaraNeural` | `TTS_EDGE_VOICE_HI` |
+| English `en-IN` | `en-IN-NeerjaNeural` | `TTS_EDGE_VOICE_EN` |
+
+## Configuration
+
+```bash
+# .env  — the only AI credential the app needs
+GROQ_API_KEY="gsk_..."
+```
+
+On boot the server verifies the key against Groq's `/models` endpoint and logs a clear result, e.g.:
+
+```
+[Provider check] GROQ_API_KEY is valid - LLM and speech-to-text are ready.
+[Provider check] 11 models on this key; usable here: qwen/qwen3.8-27b, openai/gpt-oss-20b, openai/gpt-oss-120b, whisper-large-v3-turbo
+```
+
+or `rejected with status 401`. Provider failures are always logged with their HTTP status, so a dead key can never masquerade as a voice-quality problem again.
+
+### Measured end-to-end (verified 2026-09-25)
+
+| Flow | Result |
+| --- | --- |
+| Voice round-trip: Edge TTS Kannada → Groq Whisper | 529 ms + 260 ms, Kannada script returned correctly |
+| Kannada complaint turn | ~2.7 s incl. audio; extracted `location`, `when`, `cause`, `item` correctly |
+| Hindi question turn | ~1.5 s incl. audio, answered in Devanagari |
+| English question turn | ~2.6–3.3 s incl. audio |
+| Complaint submission | reference ID issued, call + turns persisted |
+
+## Latency notes
+
+- Speech output is cached in memory per language + text, so recurring prompts (welcome menu, "press 9 to submit") replay instantly.
+- Live voice turns use the low-latency model first with JSON mode and a small token budget.
+- TTS is capped by a hard timeout; if it misses the deadline the client speaks locally instead of stalling the call.
