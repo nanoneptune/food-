@@ -8,6 +8,7 @@ import twilio from "twilio";
 import dotenv from "dotenv";
 import ffmpeg from "fluent-ffmpeg";
 import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import { MsEdgeTTS, OUTPUT_FORMAT } from "msedge-tts";
 import { PassThrough } from "stream";
 
 dotenv.config();
@@ -95,13 +96,24 @@ async function runLLMGeneration({
   system,
   prompt,
   messages,
+  json = false,
+  maxTokens = 1500,
+  preferFast = false,
+  timeoutMs,
 }: {
   system?: string;
   prompt?: string;
   messages?: any[];
+  /** Ask the provider for strict JSON output (faster, no markdown unwrapping) */
+  json?: boolean;
+  maxTokens?: number;
+  /** Live voice turns: try the lowest-latency provider first */
+  preferFast?: boolean;
+  /** Override the per-provider request timeout */
+  timeoutMs?: number;
 }): Promise<string> {
   const sarvamKey = (process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW").replace(/["'\r\n ]/g, "").trim();
-  const groqKey = (process.env.GROQ_API_KEY || "").replace(/["'\r\n ]/g, "").trim();
+  const groqKey = (process.env.GROQ_API_KEY || "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").replace(/["'\r\n ]/g, "").trim();
 
   let formattedMessages = messages && messages.length > 0
     ? messages.map((m: any) => ({
@@ -117,10 +129,56 @@ async function runLLMGeneration({
     formattedMessages = [{ role: "system", content: system }, ...formattedMessages];
   }
 
-  // 1. First Priority: Sarvam AI Indic & English Chat API (sarvam-105b-conversations)
-  if (sarvamKey && sarvamKey !== "YOUR_SARVAM_API_KEY") {
-    const sarvamModels = ["sarvam-105b-conversations", "sarvam-105b"];
-    for (const model of sarvamModels) {
+  const requestBody: any = {
+    messages: formattedMessages,
+    max_tokens: maxTokens,
+    temperature: 0.2,
+  };
+  if (json) {
+    requestBody.response_format = { type: "json_object" };
+  }
+
+  const groqModels = preferFast
+    ? ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]
+    : ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"];
+
+  const callGroq = async (): Promise<string> => {
+    if (!groqKey || groqKey === "YOUR_GROQ_API_KEY") return "";
+    for (const model of groqModels) {
+      try {
+        console.log(`[Groq Request] Querying Groq with model: ${model}...`);
+        const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${groqKey}`,
+          },
+          body: JSON.stringify({ ...requestBody, model }),
+        }, timeoutMs || (preferFast ? 6000 : 9000));
+
+        if (groqRes.ok) {
+          const data: any = await groqRes.json();
+          const reply = data?.choices?.[0]?.message?.content;
+          if (reply && reply.trim()) {
+            console.log(`[Groq Success] Model ${model} responded (${reply.length} chars)`);
+            return reply.trim();
+          }
+        } else {
+          // Never fail silently again: an expired key (401) or an exhausted
+          // quota (429) must be visible in the logs.
+          const errTxt = await groqRes.text().catch(() => "");
+          console.warn(`[Groq] model ${model} returned ${groqRes.status}: ${errTxt.slice(0, 300)}`);
+        }
+      } catch (e: any) {
+        console.warn(`Groq attempt notice for ${model}:`, e?.message);
+      }
+    }
+    return "";
+  };
+
+  const callSarvam = async (): Promise<string> => {
+    if (!sarvamKey || sarvamKey === "YOUR_SARVAM_API_KEY") return "";
+    for (const model of ["sarvam-105b-conversations", "sarvam-105b"]) {
       try {
         console.log(`[Sarvam Chat] Querying Sarvam AI model: ${model}...`);
         const sarvamRes = await fetchWithTimeout("https://api.sarvam.ai/v1/chat/completions", {
@@ -129,13 +187,8 @@ async function runLLMGeneration({
             "Content-Type": "application/json",
             "api-subscription-key": sarvamKey,
           },
-          body: JSON.stringify({
-            model: model,
-            messages: formattedMessages,
-            max_tokens: 1500,
-            temperature: 0.2,
-          }),
-        }, 12000);
+          body: JSON.stringify({ ...requestBody, model }),
+        }, timeoutMs || (preferFast ? 6500 : 12000));
 
         if (sarvamRes.ok) {
           const data: any = await sarvamRes.json();
@@ -152,45 +205,15 @@ async function runLLMGeneration({
         console.warn(`Sarvam Chat attempt notice for ${model}:`, e?.message);
       }
     }
-  }
+    return "";
+  };
 
-  // 2. Second Priority: Groq API (if valid key is provided)
-  if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
-    const groqModels = [
-      "llama-3.3-70b-versatile",
-      "llama-3.1-8b-instant",
-      "mixtral-8x7b-32768"
-    ];
-
-    for (const model of groqModels) {
-      try {
-        console.log(`[Groq Request] Querying Groq with model: ${model}...`);
-        const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${groqKey}`,
-          },
-          body: JSON.stringify({
-            model: model,
-            messages: formattedMessages,
-            max_tokens: 1500,
-            temperature: 0.2,
-          }),
-        }, 9000);
-
-        if (groqRes.ok) {
-          const data: any = await groqRes.json();
-          const reply = data?.choices?.[0]?.message?.content;
-          if (reply && reply.trim()) {
-            console.log(`[Groq Success] Model ${model} responded (${reply.length} chars)`);
-            return reply.trim();
-          }
-        }
-      } catch (e: any) {
-        console.warn(`Groq attempt notice for ${model}:`, e?.message);
-      }
-    }
+  // Latency strategy: on a live voice turn we race the fastest provider first,
+  // and fall straight through to the other one instead of waiting on timeouts.
+  const chain = preferFast ? [callGroq, callSarvam] : [callSarvam, callGroq];
+  for (const attempt of chain) {
+    const reply = await attempt();
+    if (reply) return reply;
   }
 
   return "";
@@ -273,6 +296,47 @@ async function initDB() {
         created_at INTEGER
       )
     `);
+
+    // --- IVR call sessions: one row per phone call, holding the full transcript.
+    // This is the memory the voice agent uses to behave like a person who
+    // already knows the caller, and it lets the IVR answer questions instead of
+    // only logging complaints.
+    await turso.execute(`
+      CREATE TABLE IF NOT EXISTS ivr_calls (
+        id TEXT PRIMARY KEY,
+        callerName TEXT,
+        phone TEXT,
+        language TEXT,
+        startedAt INTEGER,
+        endedAt INTEGER,
+        turnCount INTEGER,
+        status TEXT,
+        complaintId TEXT,
+        transcript TEXT,
+        collectedData TEXT
+      )
+    `);
+
+    // --- Every single turn of every IVR conversation, in order.
+    await turso.execute(`
+      CREATE TABLE IF NOT EXISTS ivr_turns (
+        id TEXT PRIMARY KEY,
+        callId TEXT,
+        turnIndex INTEGER,
+        role TEXT,
+        text TEXT,
+        language TEXT,
+        step TEXT,
+        createdAt INTEGER
+      )
+    `);
+
+    try {
+      await turso.execute(`CREATE INDEX IF NOT EXISTS idx_ivr_turns_call ON ivr_turns (callId, turnIndex)`);
+    } catch (e) {}
+    try {
+      await turso.execute(`CREATE INDEX IF NOT EXISTS idx_ivr_calls_phone ON ivr_calls (phone, startedAt)`);
+    } catch (e) {}
 
     // Seed default common Q&A items if table is empty
     try {
@@ -728,9 +792,113 @@ async function generateSarvamTTS(text: string, language: string): Promise<string
   return null;
 }
 
-// Helper to generate TTS audio data URI for instant playback
+// ---------------------------------------------------------------------------
+// Microsoft Edge "Read Aloud" neural TTS - MIT licensed, no API key, genuinely
+// free, and it speaks Kannada, Hindi and Indian English natively. This is the
+// PRIMARY voice for the IVR. One WebSocket session is reused per voice, so a
+// reply is synthesised in a few hundred milliseconds instead of seconds.
+// ---------------------------------------------------------------------------
+const EDGE_TTS_VOICES: Record<string, string> = {
+  "kn-IN": process.env.TTS_EDGE_VOICE_KN || "kn-IN-SapnaNeural",
+  "hi-IN": process.env.TTS_EDGE_VOICE_HI || "hi-IN-SwaraNeural",
+  "en-IN": process.env.TTS_EDGE_VOICE_EN || "en-IN-NeerjaNeural",
+};
+
+type EdgeTtsSession = { client: MsEdgeTTS; voice: string; queue: Promise<any> };
+const edgeTtsSessions: Record<string, EdgeTtsSession | undefined> = {};
+
+function escapeXml(input: string): string {
+  return String(input || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+async function edgeTextToSpeech(text: string, language: string): Promise<string | null> {
+  const langCode = normalizeIvrLang(language);
+  const voice = EDGE_TTS_VOICES[langCode] || EDGE_TTS_VOICES["en-IN"];
+  const clean = stripEmojis(text).slice(0, 600);
+  if (!clean) return null;
+
+  let session = edgeTtsSessions[langCode];
+  if (!session) {
+    session = { client: new MsEdgeTTS(), voice: "", queue: Promise.resolve() };
+    edgeTtsSessions[langCode] = session;
+  }
+  const active = session;
+
+  const run = async (): Promise<string | null> => {
+    try {
+      if (active.voice !== voice) {
+        await active.client.setMetadata(voice, OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3);
+        active.voice = voice;
+      }
+
+      const { audioStream } = active.client.toStream(escapeXml(clean), { rate: 1.08, pitch: "+0Hz" });
+      const chunks: Buffer[] = [];
+
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("Edge TTS timed out")), 9000);
+        const done = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        audioStream.on("data", (d: any) => chunks.push(Buffer.from(d)));
+        audioStream.on("end", done);
+        audioStream.on("close", done);
+        audioStream.on("error", (e: any) => {
+          clearTimeout(timer);
+          reject(e);
+        });
+      });
+
+      const buf = Buffer.concat(chunks);
+      if (!buf.length) return null;
+      return `data:audio/mpeg;base64,${buf.toString("base64")}`;
+    } catch (err: any) {
+      // Retire the broken session so the next turn opens a fresh connection.
+      try { active.client.close(); } catch {}
+      edgeTtsSessions[langCode] = undefined;
+      console.warn("Edge neural TTS notice:", err?.message);
+      return null;
+    }
+  };
+
+  // Serialise synthesis per voice: one WebSocket stream at a time.
+  const pending = active.queue.then(run, run);
+  active.queue = pending.catch(() => null);
+  return pending;
+}
+
+// Small in-memory cache for spoken audio. Recurring lines (the welcome prompts,
+// "press 9 to submit", confirmations) replay instantly instead of waiting on
+// the voice provider, which is the biggest single chunk of IVR latency.
+const ttsCache = new Map<string, string>();
+const TTS_CACHE_LIMIT = 120;
+
+// Helper to generate TTS audio data URI for instant playback.
+// Order: free Edge neural voice first, paid Sarvam only as a fallback.
 async function generateTTSAudioUrl(text: string, language: string): Promise<string | null> {
-  return await generateSarvamTTS(text, language);
+  const key = `${normalizeIvrLang(language)}::${String(text || "").slice(0, 500)}`;
+  const cached = ttsCache.get(key);
+  if (cached) return cached;
+
+  let url = await edgeTextToSpeech(text, language);
+  if (!url) {
+    console.warn("[TTS] Edge neural voice unavailable, trying Sarvam fallback...");
+    url = await generateSarvamTTS(text, language);
+  }
+
+  if (url) {
+    if (ttsCache.size >= TTS_CACHE_LIMIT) {
+      const oldest = ttsCache.keys().next().value;
+      if (oldest) ttsCache.delete(oldest);
+    }
+    ttsCache.set(key, url);
+  }
+  return url;
 }
 
 // Entity cleaning helper
@@ -820,10 +988,14 @@ function analyzeCustomerWords(
       }
     }
     if (!entities.location) {
-      const enHotelMatch = allUserTexts.match(/(?:at|in|from|hotel|restaurant|cafe|dhaba)\s+([A-Z][a-zA-Z0-9\s'-]{2,25}(?:Hotel|Restaurant|Cafe|Dhaba|Kitchen|Bhavan|Sagar)?)/i);
+      // NOTE: the leading \b is essential - without it "at" inside "What"
+      // matched and stored nonsense like "is FSSAI and how does it w" as the
+      // caller's restaurant.
+      const enHotelMatch = allUserTexts.match(/\b(?:at|in|from|hotel|restaurant|cafe|dhaba)\s+([A-Z][a-zA-Z0-9\s'-]{2,25}(?:Hotel|Restaurant|Cafe|Dhaba|Kitchen|Bhavan|Sagar)?)/i);
       if (enHotelMatch && enHotelMatch[1]) {
         const captured = enHotelMatch[1].trim();
-        if (!/^(the|yesterday|today|night|evening|morning|food|dinner)$/i.test(captured)) {
+        const looksLikeQuestion = /\b(what|how|why|when|where|which|who|is|are|was|were|does|do|can|could|tell|explain|help)\b/i.test(captured);
+        if (!looksLikeQuestion && !/^(the|yesterday|today|night|evening|morning|food|dinner|my|our|this|that)$/i.test(captured)) {
           entities.location = captured;
         }
       }
@@ -1103,6 +1275,356 @@ Always respond warmly, naturally, and directly to what the user actually said.`;
   }
 });
 
+// ---------------------------------------------------------------------------
+// IVR helpers
+// Language normalisation, caller memory, knowledge grounding, turn persistence
+// and human-like reply sanitation for the voice helpline.
+// ---------------------------------------------------------------------------
+
+type IvrLangCode = "kn-IN" | "hi-IN" | "en-IN";
+
+function normalizeIvrLang(input?: string): IvrLangCode {
+  const v = String(input || "").toLowerCase();
+  if (v.includes("kn") || v.includes("kannada") || v.includes("ಕನ್ನಡ")) return "kn-IN";
+  if (v.includes("hi") || v.includes("hindi") || v.includes("हिंदी") || v.includes("हिन्दी")) return "hi-IN";
+  return "en-IN";
+}
+
+function ivrLangName(code: string): string {
+  if (code === "kn-IN") return "Kannada";
+  if (code === "hi-IN") return "Hindi";
+  return "English";
+}
+
+function queryTokens(text: string): string[] {
+  if (!text) return [];
+  const raw = text.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const w of raw) {
+    if (w.length < 3 && !/[\u0C80-\u0CFF\u0900-\u097F]/.test(w)) continue;
+    if (/^(the|and|for|with|that|this|you|your|are|was|have|has|what|how|why|when|where|please|tell|about|ನಮಸ್ಕಾರ|नमस्ते)$/.test(w)) continue;
+    if (seen.has(w)) continue;
+    seen.add(w);
+    out.push(w);
+  }
+  return out;
+}
+
+function overlapScore(tokens: string[], corpus: string): number {
+  if (!tokens.length || !corpus) return 0;
+  const hay = corpus.toLowerCase();
+  let hits = 0;
+  for (const t of tokens) {
+    if (hay.includes(t)) hits++;
+  }
+  return hits / Math.sqrt(tokens.length);
+}
+
+/**
+ * Pulls the most relevant rows out of the uploaded knowledge base and the
+ * learned Q&A cache, so the IVR can actually ANSWER a question instead of
+ * only collecting a complaint.
+ */
+async function getIvrKnowledgeContext(langCode: string, query: string, limit = 3): Promise<string> {
+  try {
+    const turso = getTurso();
+    if (!turso) return "";
+    const langName = ivrLangName(langCode);
+    const tokens = queryTokens(query);
+
+    const kb = await turso.execute("SELECT name, content FROM knowledge_base ORDER BY createdAt DESC LIMIT 60");
+    const qa = await turso.execute({
+      sql: "SELECT question, answer FROM qa_cache WHERE language = ? OR language = ? ORDER BY created_at DESC LIMIT 120",
+      args: [langName, langCode],
+    });
+
+    const scored: Array<{ score: number; text: string }> = [];
+
+    for (const row of kb.rows as any[]) {
+      const content = String(row.content || "").replace(/\s+/g, " ").trim();
+      if (!content) continue;
+      const score = overlapScore(tokens, `${row.name || ""} ${content}`) + 0.2;
+      if (score > 0.3) {
+        scored.push({ score, text: `• DOCUMENT (${row.name || "reference"}): ${content.slice(0, 600)}` });
+      }
+    }
+
+    for (const row of qa.rows as any[]) {
+      const q = String(row.question || "").trim();
+      const a = String(row.answer || "").trim();
+      if (!q || !a) continue;
+      const score = overlapScore(tokens, q) + 0.25;
+      if (score > 0.3) {
+        scored.push({ score, text: `• KNOWN ANSWER — Q: ${q} | A: ${a.slice(0, 500)}` });
+      }
+    }
+
+    return scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map((s) => s.text)
+      .join("\n");
+  } catch (e: any) {
+    console.warn("[IVR] knowledge lookup notice:", e?.message);
+    return "";
+  }
+}
+
+/**
+ * Last-resort answering path: when no LLM provider is reachable (expired key or
+ * exhausted credits) the helpline still ANSWERS from its own stored knowledge
+ * instead of falling back to a complaint question.
+ */
+function answerFromKnowledgeContext(context: string, langCode: string): string {
+  if (!context) return "";
+
+  let answer = "";
+  const known = context.split("\n").find((l) => l.includes("KNOWN ANSWER"));
+  if (known) {
+    const idx = known.indexOf("| A:");
+    answer = idx >= 0 ? known.slice(idx + 4).trim() : known.replace(/^.*?Q:\s*/, "").trim();
+  } else {
+    const doc = context.split("\n").find((l) => l.trim().startsWith("• DOCUMENT"));
+    if (doc) answer = doc.replace(/^•\s*DOCUMENT\s*\([^)]*\):\s*/, "").trim();
+  }
+
+  if (!answer) return "";
+
+  // Keep it speakable: at most two sentences / ~60 words.
+  const twoSentences = answer.split(/(?<=[.!?।])\s+/).slice(0, 2).join(" ").trim();
+  const words = twoSentences.split(/\s+/).slice(0, 60).join(" ");
+  return words.trim();
+}
+
+/** Stores a newly answered question so the IVR gets smarter over time. */
+async function rememberQaPair(params: { langCode: string; question: string; answer: string }): Promise<void> {
+  try {
+    const turso = getTurso();
+    if (!turso) return;
+    const langName = ivrLangName(params.langCode);
+    const q = (params.question || "").replace(/\s+/g, " ").trim().slice(0, 300);
+    const a = (params.answer || "").replace(/\s+/g, " ").trim().slice(0, 1200);
+    if (q.length < 5 || a.length < 12) return;
+
+    const existing = await turso.execute({
+      sql: "SELECT id FROM qa_cache WHERE question = ? AND language = ? LIMIT 1",
+      args: [q, langName],
+    });
+    if (existing.rows.length > 0) return;
+
+    await turso.execute({
+      sql: `INSERT INTO qa_cache (id, normalized_intent, language, question, answer, audio_url, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        `qa_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+        "learned_ivr",
+        langName,
+        q,
+        a,
+        "",
+        Date.now(),
+      ],
+    });
+  } catch (e: any) {
+    console.warn("[IVR] qa_cache write notice:", e?.message);
+  }
+}
+
+/** Persists one turn of an IVR conversation. */
+async function logIvrTurn(params: {
+  callId?: string;
+  turnIndex?: number;
+  role: "user" | "assistant";
+  text: string;
+  langCode: string;
+  step: string;
+}): Promise<void> {
+  if (!params.callId || !params.text) return;
+  try {
+    const turso = getTurso();
+    if (!turso) return;
+    await turso.execute({
+      sql: `INSERT INTO ivr_turns (id, callId, turnIndex, role, text, language, step, createdAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      args: [
+        `${params.callId}_${params.turnIndex ?? 0}_${params.role}_${Math.random().toString(36).slice(2, 6)}`,
+        params.callId,
+        params.turnIndex ?? 0,
+        params.role,
+        String(params.text).slice(0, 4000),
+        params.langCode,
+        params.step || "",
+        Date.now(),
+      ],
+    });
+  } catch (e: any) {
+    console.warn("[IVR] turn log notice:", e?.message);
+  }
+}
+
+/** Creates or updates the call session row. */
+async function upsertIvrCall(params: {
+  callId?: string;
+  profile?: any;
+  language?: string;
+  status?: string;
+  turnCount?: number;
+  complaintId?: string;
+  transcript?: string;
+  collectedData?: any;
+  ended?: boolean;
+}): Promise<void> {
+  if (!params.callId) return;
+  try {
+    const turso = getTurso();
+    if (!turso) return;
+
+    const existing = await turso.execute({
+      sql: "SELECT id FROM ivr_calls WHERE id = ? LIMIT 1",
+      args: [params.callId],
+    });
+
+    if (existing.rows.length === 0) {
+      await turso.execute({
+        sql: `INSERT INTO ivr_calls
+              (id, callerName, phone, language, startedAt, endedAt, turnCount, status, complaintId, transcript, collectedData)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          params.callId,
+          params.profile?.name || "IVR Caller",
+          params.profile?.phone || "IVR Phone",
+          params.language || "en-IN",
+          Date.now(),
+          0,
+          params.turnCount ?? 0,
+          params.status || "active",
+          params.complaintId || "",
+          params.transcript || "",
+          JSON.stringify(params.collectedData || {}),
+        ],
+      });
+      return;
+    }
+
+    if (params.status) {
+      await turso.execute({ sql: "UPDATE ivr_calls SET status = ? WHERE id = ?", args: [params.status, params.callId] });
+    }
+    if (typeof params.turnCount === "number") {
+      await turso.execute({ sql: "UPDATE ivr_calls SET turnCount = ? WHERE id = ?", args: [params.turnCount, params.callId] });
+    }
+    if (params.language) {
+      await turso.execute({ sql: "UPDATE ivr_calls SET language = ? WHERE id = ?", args: [params.language, params.callId] });
+    }
+    if (params.complaintId) {
+      await turso.execute({ sql: "UPDATE ivr_calls SET complaintId = ? WHERE id = ?", args: [params.complaintId, params.callId] });
+    }
+    if (typeof params.transcript === "string") {
+      await turso.execute({ sql: "UPDATE ivr_calls SET transcript = ? WHERE id = ?", args: [params.transcript.slice(0, 8000), params.callId] });
+    }
+    if (params.collectedData) {
+      await turso.execute({ sql: "UPDATE ivr_calls SET collectedData = ? WHERE id = ?", args: [JSON.stringify(params.collectedData), params.callId] });
+    }
+    if (params.ended) {
+      await turso.execute({ sql: "UPDATE ivr_calls SET endedAt = ? WHERE id = ?", args: [Date.now(), params.callId] });
+    }
+  } catch (e: any) {
+    console.warn("[IVR] call upsert notice:", e?.message);
+  }
+}
+
+/**
+ * "Have I spoken to this person before?" - gives the agent real memory of the
+ * caller so it behaves like someone who has met them, not like a form.
+ */
+async function loadCallerMemory(phone?: string): Promise<string> {
+  if (!phone) return "";
+  try {
+    const turso = getTurso();
+    if (!turso) return "";
+    const lines: string[] = [];
+
+    const calls = await turso.execute({
+      sql: "SELECT startedAt, collectedData, status FROM ivr_calls WHERE phone = ? ORDER BY startedAt DESC LIMIT 3",
+      args: [phone],
+    });
+    for (const r of calls.rows as any[]) {
+      let d: any = {};
+      try { d = JSON.parse(String(r.collectedData || "{}")); } catch {}
+      const when = r.startedAt ? new Date(Number(r.startedAt)).toLocaleDateString() : "recently";
+      const subject = d.cause || d.item || "a food safety concern";
+      const where = d.location ? ` at ${d.location}` : "";
+      lines.push(`- Called on ${when} about ${subject}${where}`);
+    }
+
+    const complaints = await turso.execute({
+      sql: "SELECT id, location, status FROM complaints WHERE phoneNumber = ? ORDER BY createdAt DESC LIMIT 3",
+      args: [phone],
+    });
+    for (const c of complaints.rows as any[]) {
+      lines.push(`- Complaint #${c.id} at ${c.location || "an outlet"} (status: ${c.status})`);
+    }
+
+    return lines.join("\n");
+  } catch (e: any) {
+    console.warn("[IVR] caller memory notice:", e?.message);
+    return "";
+  }
+}
+
+const IVR_GREETING_WORDS = [
+  "namaskara", "namaskaram", "namaskar", "namaste", "namasthe", "hello", "hi there", "hi", "hey",
+  "नमस्कार", "नमस्ते", "हैलो", "ನಮಸ್ಕಾರ", "ನಮಸ್ತೆ", "ಹಲೋ", "ಸ್ವಾಗತ", "ಸುಸ್ವಾಗತ",
+];
+
+/**
+ * A real person greets you ONCE and does not re-address you by name in every
+ * sentence. This strips repeated greetings / name callouts from ongoing turns.
+ */
+function sanitizeIvrReply(text: string, opts: { turnIndex: number; name?: string }): string {
+  let out = String(text || "").replace(/\s+/g, " ").trim();
+  if (!out) return out;
+
+  const isOngoing = opts.turnIndex > 1;
+  if (!isOngoing) return out;
+
+  // 1. Strip greetings only if they are at the very start of the reply.
+  let guard = 0;
+  let changed = true;
+  while (changed && guard < 3) {
+    changed = false;
+    guard++;
+    const lower = out.toLowerCase();
+    for (const g of IVR_GREETING_WORDS) {
+      if (lower.startsWith(g)) {
+        out = out.slice(g.length).replace(/^[\s,.!?।:;\-–]+/, "");
+        changed = true;
+        break;
+      }
+    }
+  }
+
+  // 2. Drop name callouts near the start ("Ramesh, ...") - once is enough.
+  const name = String(opts.name || "").trim();
+  if (name.length > 2) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    out = out.replace(new RegExp(`^\\s*${escaped}\\s*[,!।:;\\-–]\\s*`, "i"), "");
+    out = out.replace(new RegExp(`^\\s*${escaped}\\b\\s*[,!।:;\\-–]?\\s*`, "i"), "");
+  }
+
+  // 3. Remove greetings repeated mid-sentence.
+  out = out
+    .replace(/[,!।.\-–]?\s*(ನಮಸ್ಕಾರ|ನಮಸ್ತೆ|ಸ್ವಾಗತ|नमस्ते|नमस्कार|namaskara|namaskaram|namaste)\s*[,!।.\-–]?/gi, " ")
+    .replace(/\s{2,}/g, " ")
+    .replace(/^[\s,.!?।:;\-–]+/, "")
+    .trim();
+
+  // 4. Never leave the reply empty after cleaning.
+  if (!out || out.length < 8) return String(text || "").replace(/\s+/g, " ").trim();
+
+  return out;
+}
+
 // API: Dedicated Calm & Pleasant IVR Dialogue State Machine
 app.post("/api/ivr/dialogue", async (req, res) => {
   const { 
@@ -1114,9 +1636,12 @@ app.post("/api/ivr/dialogue", async (req, res) => {
     collectedData = {}, 
     history = [],
     audioNoteUrl,
-    isVoiceNote
+    isVoiceNote,
+    callId,
+    turnIndex = 0
   } = req.body;
 
+  const callerTurn = Number(turnIndex) || 0;
   let currentLang = collectedData?.language || language || "en-IN";
   let nextStep = step;
   let replyText = "";
@@ -1126,6 +1651,7 @@ app.post("/api/ivr/dialogue", async (req, res) => {
   }
   let isComplaintReady = false;
   let markdownReport = "";
+  let raisedComplaintId = "";
 
   // Explicit Script-based and DTMF language detection
   if (digits === "1" || (step === "welcome" && (/1|one|kannada|ಕನ್ನಡ|ಒಂದು/i.test(message || "")))) {
@@ -1204,13 +1730,23 @@ Respond in strict JSON:
 }`;
 
         try {
-          const aiResponse = await runLLMGeneration({ prompt }) || "{}";
-          const parsed = JSON.parse(aiResponse);
+          const aiResponse = await runLLMGeneration({
+            prompt,
+            json: true,
+            maxTokens: 320,
+            preferFast: true,
+          }) || "{}";
+          const parsed = cleanAndParseJson(aiResponse) || {};
           if (parsed.cause) updatedData.cause = parsed.cause;
           if (parsed.location) updatedData.location = parsed.location;
           if (parsed.when) updatedData.when = parsed.when;
           if (parsed.item) updatedData.item = parsed.item;
-          if (parsed.spokenResponse) replyText = parsed.spokenResponse;
+          if (parsed.spokenResponse) {
+            replyText = sanitizeIvrReply(String(parsed.spokenResponse), {
+              turnIndex: Math.max(2, callerTurn),
+              name: profile?.name,
+            });
+          }
         } catch {}
       }
 
@@ -1224,12 +1760,21 @@ Respond in strict JSON:
         }
       }
     }
-    // 3. DTMF Key 9 or explicit user confirmation to submit
-    else if (digits === "9" || (step === "press_7_prompt" && /9|nine|confirm|yes|submit|sari|ha|ದೃಢೀಕರಿಸಿ|ಒಂಬತ್ತು|दर्ज|पुष्टि|हाँ|नौ/i.test(message || ""))) {
+    // 3. DTMF Key 9 or explicit user confirmation to submit.
+    //    A plain "yes / confirm / sari" is honoured at any point once the agent
+    //    has actually asked for confirmation, so the caller is never trapped in
+    //    a loop of the same prompt.
+    else if (
+      digits === "9" ||
+      (step === "press_7_prompt" && /9|nine|confirm|yes|submit|sari|ha|ದೃಢೀಕರಿಸಿ|ಒಂಬತ್ತು|दर्ज|पुष्टि|हाँ|नौ/i.test(message || "")) ||
+      ((step === "collecting_info" || step === "press_7_prompt") &&
+        /^(confirm|confirmed|submit|yes|yes please|sari|haan|ha|ok|okay|done|that'?s all|proceed|ದೃಢೀಕರಿಸಿ|ಹೌದು|ಸರಿ|मंज़ूर|हाँ|हां|पुष्टि|ठीक है)[\s!.,।]*$/i.test((message || "").trim()))
+    ) {
       nextStep = "submitted";
       isComplaintReady = true;
 
       const caseId = `GRV-${Date.now().toString().slice(-6)}`;
+      raisedComplaintId = caseId;
       const cause = updatedData.cause || "Food hygiene & quality discrepancy";
       const location = updatedData.location || profile?.location || "Unspecified Branch";
       const item = updatedData.item || "Food Item";
@@ -1296,112 +1841,112 @@ ${updatedData.audioNoteUrl ? `**Voice Note Attached (MP3):** [Play Voice Evidenc
       }
 
       if (isKannada) {
-        replyText = `ನಿಮ್ಮ ದೂರು ಸಂಖ್ಯೆ ${caseId} ಯಶಸ್ವಿಯಾಗಿ ನೋಂದಾಯಿಸಲ್ಪಟ್ಟಿದೆ. ನಾವು ಮುಂದಿನ ಕ್ರಮವನ್ನು ಕೈಗೊಳ್ಳುತ್ತೇವೆ. ಧನ್ಯವಾದಗಳು, ${profile?.name || 'ಸ್ನೇಹಿತರೇ'}! ಬೈ ${profile?.name || ''}, ತಮ್ಮ ದಿನ ಶುಭವಾಗಿರಲಿ!`;
+        replyText = `ನಿಮ್ಮ ದೂರು ಸಂಖ್ಯೆ ${caseId} ಯಶಸ್ವಿಯಾಗಿ ನೋಂದಾಯಿಸಲ್ಪಟ್ಟಿದೆ. ನಾವು ಮುಂದಿನ ಕ್ರಮವನ್ನು ಕೈಗೊಳ್ಳುತ್ತೇವೆ. ಧನ್ಯವಾದಗಳು, ತಮ್ಮ ದಿನ ಶುಭವಾಗಿರಲಿ!`;
       } else if (isHindi) {
-        replyText = `आपकी शिकायत संख्या ${caseId} सफलतापूर्वक दर्ज कर ली गई है। हम आगे की उचित कार्रवाई करेंगे। धन्यवाद, ${profile?.name || 'प्रिय ग्राहक'}! बाय ${profile?.name || ''}, आपका दिन शुभ हो!`;
+        replyText = `आपकी शिकायत संख्या ${caseId} सफलतापूर्वक दर्ज कर ली गई है। हम आगे की उचित कार्रवाई करेंगे। धन्यवाद, आपका दिन शुभ हो!`;
       } else {
-        replyText = `Your complaint reference ID ${caseId} has been successfully registered. We will take care further. Thank you, ${profile?.name || 'Valued Customer'}! Bye ${profile?.name || ''}, have a nice day!`;
+        replyText = `Your complaint reference ID ${caseId} has been successfully registered. We will take care of it further. Thank you, have a nice day!`;
       }
     }
-    // 4. Ongoing conversation to collect information (Where, When, Cause)
+    // 4. Live conversation - the agent talks like a person, answers real
+    //    questions, remembers what the caller already said, and only then
+    //    collects the complaint facts.
     else {
-      // Analyze customer words with semantic context memory
+      // 4a. Understand what the caller said using conversation-wide memory.
       const analysis = analyzeCustomerWords(message, history, updatedData, currentLang);
-      if (analysis.location && !updatedData.location) updatedData.location = analysis.location;
-      if (analysis.when && !updatedData.when) updatedData.when = analysis.when;
-      if (analysis.cause && !updatedData.cause) updatedData.cause = analysis.cause;
-      if (analysis.item && !updatedData.item) updatedData.item = analysis.item;
-      if (analysis.owner && !updatedData.owner) updatedData.owner = analysis.owner;
 
-      // Check if user is greeting or asking an informational question vs reporting an incident
-      const isGreeting = /^(hello|hi|hey|namaste|namaskara|good\s+morning|good\s+evening|ನಮಸ್ಕಾರ|ನಮಸ್ತೆ|नमस्ते|ಹಲೋ)$/i.test((message || "").trim());
-      const isInformational = !isGreeting && (analysis.isInformationalInquiry || /^(what|how|why|who|explain|tell|fssai|rules|law|information|help|ಏನು|ಹೇಗೆ|ಯಾಕೆ|ಯಾರು|ತಿಳಿಸಿ|ಹೇಳಿ|ಬಗ್ಗೆ|ಸಹಾಯ|क्या|कैसे|बताओ|जानकारी)/i.test(message || ""));
+      const saidText = String(message || "").trim();
+      const isGreeting = /^(hello|hi|hey|namaste|namaskara|namaskaram|good\s+morning|good\s+evening|ನಮಸ್ಕಾರ|ನಮಸ್ತೆ|नमस्ते|हैलो|ಹಲೋ)[\s!.,।]*$/i.test(saidText);
+      const asksAQuestion = /\?|ಏನು|ಹೇಗೆ|ಯಾಕೆ|ಯಾರು|ಎಷ್ಟು|ಎಲ್ಲಿ|ಯಾವಾಗ|ತಿಳಿಸಿ|ಹೇಳಿ|ಬಗ್ಗೆ|सहायता|क्या|कैसे|क्यों|कब|कहाँ|बताइए|जानकारी|what|how|why|who|when|where|which|can you|could you|tell me|explain|help/i.test(saidText);
+      const isInformational = !isGreeting && (analysis.isInformationalInquiry || asksAQuestion);
+
+      // A question is a question: never scrape a "location/date/cause" out of
+      // it, otherwise junk such as "is FSSAI and how does it" ends up stored as
+      // the caller's restaurant.
+      if (!isInformational) {
+        if (analysis.location && !updatedData.location) updatedData.location = analysis.location;
+        if (analysis.when && !updatedData.when) updatedData.when = analysis.when;
+        if (analysis.cause && !updatedData.cause) updatedData.cause = analysis.cause;
+        if (analysis.item && !updatedData.item) updatedData.item = analysis.item;
+        if (analysis.owner && !updatedData.owner) updatedData.owner = analysis.owner;
+      }
+
+      // 4b. Ground the reply in real data: uploaded knowledge + learned Q&A +
+      //     this caller's earlier calls.
+      const knowledge = await getIvrKnowledgeContext(currentLang, saidText);
+      const callerMemory = await loadCallerMemory(profile?.phone);
+
+      const memoryBlock = `Known so far in this call:
+- Cause / problem: ${updatedData.cause || "not yet known"}
+- Place (hotel / restaurant / branch): ${updatedData.location || "not yet known"}
+- When: ${updatedData.when || "not yet known"}
+- Food item: ${updatedData.item || "not yet known"}
+- Still missing: ${analysis.missingFields.join(", ") || "nothing"}
+- Caller says they are done / confirming: ${analysis.isExhaustedOrConfirming ? "yes" : "no"}
+${callerMemory ? `Earlier contact with this caller:\n${callerMemory}` : ""}`;
+
+      const languageRules = `LANGUAGE: reply ONLY in ${langName}. ${
+        isKannada
+          ? "Write every single word in Kannada script (ಕನ್ನಡ), never in English."
+          : isHindi
+          ? "Write every single word in Devanagari (हिंदी), never in English."
+          : "Reply in clear, simple Indian English."
+      }`;
+
+      const humanRules = `HOW A REAL PERSON TALKS ON A HELPLINE CALL:
+- Greet only in the very first sentence of the call. From now on: no "Namaskara", no "Namaste", no "Hello", and do NOT keep repeating the caller's name.
+- Acknowledge what they just said in your own words, then continue - like a caring human on the phone.
+- 1 to 2 short spoken sentences. Never read out lists, markdown, symbols or emojis.
+- Never ask for a detail that is already known above.
+- Ask at most ONE question per turn, and only when you genuinely need it.
+- If the caller asks ANY question - rules, licence, hygiene, penalty, procedure, how to complain, complaint status - answer it properly and helpfully FIRST. This helpline must answer questions, not only record complaints.
+- If the caller sounds upset, reassure them briefly before asking anything else.
+- Never invent an outlet name, date, person or fact the caller did not mention.`;
 
       let prompt = "";
       if (isGreeting) {
-        prompt = `You are a warm, friendly, natural human-like assistant for VoxAssist. You converse like a person meeting someone warmly.
-Caller just said: "${message}"
-Caller Name: ${profile?.name || "Caller"}
-Target Language: ${langName} (${currentLang}).
-
-INSTRUCTIONS:
-1. Greet the caller warmly, naturally, and cordially in ONE short spoken sentence in ${langName}.
-2. Ask how you can help or chat with them today.
-3. If Kannada, write purely in Kannada script (ಕನ್ನಡ). If Hindi, write purely in Hindi script (हिंदी). If English, write in English.
-
-Respond in strict JSON:
-{
-  "cause": "",
-  "location": "",
-  "when": "",
-  "item": "",
-  "spokenResponse": "One short, warm conversational greeting sentence in ${langName}",
-  "hasRequiredDetails": false
-}`;
+        prompt = `You are the voice of the Food Safety Helpline - a warm, natural, human-sounding agent.
+The caller just greeted you: "${saidText}"
+${languageRules}
+Reply with ONE short, warm, human sentence that greets them back and asks how you can help.
+Respond in strict JSON: {"cause":"","location":"","when":"","item":"","spokenResponse":"<one sentence>","hasRequiredDetails":false}`;
       } else if (isInformational) {
-        prompt = `You are a warm, knowledgeable food safety and consumer expert assistant for VoxAssist.
-Citizen just asked: "${message}"
-Target Language: ${langName} (${currentLang}).
+        prompt = `You are a warm, knowledgeable food safety and consumer affairs expert answering a helpline caller by phone.
+Caller asked: "${saidText}"
+${languageRules}
+${knowledge ? `Verified reference material you should use when relevant:\n${knowledge}\n` : ""}
+${memoryBlock}
 
-INSTRUCTIONS:
-1. Answer the question directly, accurately, and conversationally in 1-2 spoken sentences strictly in ${langName}.
-2. If language is Kannada (${isKannada ? 'YES' : 'NO'}), EVERY SINGLE WORD must be in Kannada script (ಕನ್ನಡ ಲಿಪಿ). If Hindi (${isHindi ? 'YES' : 'NO'}), EVERY SINGLE WORD must be in Hindi script.
-3. DO NOT interrogate or ask for complaint details since the user asked a general or informational question.
-
-Respond in strict JSON:
-{
-  "cause": "",
-  "location": "",
-  "when": "",
-  "item": "",
-  "spokenResponse": "1-2 warm, conversational informative sentences in ${langName}",
-  "hasRequiredDetails": false
-}`;
+RULES:
+- Answer the question directly and helpfully in 1-2 spoken sentences. Answering is the whole point of this turn - do not dodge it and do not just demand complaint details.
+- If the reference material does not cover it, answer from general food safety and consumer protection knowledge.
+- Be conversational and human. No markdown, no bullet points, no emojis.
+Respond in strict JSON: {"cause":"","location":"","when":"","item":"","spokenResponse":"<1-2 sentences>","hasRequiredDetails":false}`;
       } else {
-        prompt = `You are a calm, gentle, highly empathetic, and polite IVR Phone Agent for VoxAssist Consumer Food Safety Helpline.
-User profile: Name: ${profile?.name || "Caller"}, Phone: ${profile?.phone || "On File"}, Location: ${profile?.location || "Not given"}.
-Currently known details from memory:
-- Cause: ${updatedData.cause || "Unknown"}
-- Location/Where: ${updatedData.location || "Unknown"}
-- When: ${updatedData.when || "Unknown"}
-- Item: ${updatedData.item || "Unknown"}
-- Missing Required Fields: ${analysis.missingFields.join(", ") || "None"}
-- Customer Exhaustion / Done Talking: ${analysis.isExhaustedOrConfirming ? "YES" : "NO"}
+        prompt = `You are the voice of the Food Safety Helpline - a warm, attentive human-sounding agent on a live phone call.
+Caller's name: ${profile?.name || "the caller"}
 
-Customer just said: "${message}"
+${memoryBlock}
 
-Selected Language: ${langName} (${currentLang}).
+The caller just said: "${saidText}"
 
-CRITICAL MANDATORY INSTRUCTIONS:
-1. You MUST generate the spokenResponse 100% in ${langName}. If the language is Kannada (${isKannada ? 'YES' : 'NO'}), EVERY SINGLE WORD must be in Kannada script. If Hindi (${isHindi ? 'YES' : 'NO'}), EVERY SINGLE WORD must be in Hindi script. NEVER use English words for Kannada/Hindi callers.
-2. DO NOT repeat "Namaskara" (ನಮಸ್ಕಾರ / नमस्ते / Hello) or constantly repeat the person's name in your ongoing conversation. Answer or ask directly and naturally without redundant greetings.
-3. DO NOT ask for any details that are already known in memory!
-4. If any of the following details are missing, calmly and politely ask the customer for ONLY ONE missing detail:
-   - WHERE (the specific restaurant, branch, or outlet name)
-   - WHEN (the date and approximate time of the incident)
-   - CAUSE / DETAILS (what was wrong with the food or service)
-5. When speaking Kannada or Hindi, be polite and direct without unnecessary filler greetings.
-6. If Cause, Location, and When are known OR if Customer Exhaustion is YES:
-   Calmly summarize and state:
-   ${isKannada 
-     ? '"ಧನ್ಯವಾದಗಳು, ವಿವರಗಳನ್ನು ದಾಖಲಿಸಲಾಗಿದೆ. ತಾವು ಧ್ವನಿ ಸಂದೇಶ ರೆಕಾರ್ಡ್ ಮಾಡಲು ಬಯಸಿದರೆ 7 ಒತ್ತಿ, ಅಥವಾ ದೂರನ್ನು ಸಲ್ಲಿಸಲು 9 ಒತ್ತಿ."' 
-     : (isHindi 
-        ? '"धन्यवाद, विवरण दर्ज कर लिया गया है। यदि आप ऑडियो संदेश रिकॉर्ड करना चाहते हैं तो 7 दबाएँ, अथवा शिकायत दर्ज करने के लिए 9 दबाएँ।"' 
-        : '"Thank you, details are recorded. If you would like to record a voice note, press 7. To submit your complaint now, press 9 or say confirm."')}
-7. Keep your spoken response to 1-2 calm, highly polite, reassuring sentences strictly in ${langName}.
+${languageRules}
+${knowledge ? `Verified reference material you may use:\n${knowledge}\n` : ""}
+${humanRules}
 
-Respond in strict JSON:
-{
-  "cause": "updated or existing cause",
-  "location": "updated or existing location",
-  "when": "updated or existing when",
-  "item": "updated or existing item",
-  "spokenResponse": "1-2 highly polite sentences to speak to the caller strictly in ${langName}",
-  "hasRequiredDetails": true/false
-}`;
+TASK:
+1. React naturally to what the caller said (acknowledge, reassure, or answer).
+2. If they are still describing a problem and an important detail is missing, ask for exactly ONE missing detail.
+3. If everything needed is known, or they say they are finished, tell them in ${langName} that the details are recorded, that they can press 7 to record a voice note, or press 9 / say "confirm" to submit the complaint.
+Respond in strict JSON: {"cause":"<cause or empty>","location":"<place or empty>","when":"<when or empty>","item":"<food item or empty>","spokenResponse":"<1-2 spoken sentences>","hasRequiredDetails":true/false}`;
       }
 
-      const aiResponse = await runLLMGeneration({ prompt }) || "{}";
+      const aiResponse = await runLLMGeneration({
+        prompt,
+        json: true,
+        maxTokens: 320,
+        preferFast: true,
+      }) || "{}";
       const parsed: any = cleanAndParseJson(aiResponse) || {};
 
       if (parsed.cause && !updatedData.cause) updatedData.cause = parsed.cause;
@@ -1409,48 +1954,117 @@ Respond in strict JSON:
       if (parsed.when && !updatedData.when) updatedData.when = parsed.when;
       if (parsed.item && !updatedData.item) updatedData.item = parsed.item;
 
-      const hasAllDetails = parsed.hasRequiredDetails || 
-        analysis.hasAllRequired || 
-        analysis.isExhaustedOrConfirming || 
+      const hasAllDetails = parsed.hasRequiredDetails ||
+        analysis.hasAllRequired ||
+        analysis.isExhaustedOrConfirming ||
         (updatedData.cause && updatedData.location);
 
-      if (hasAllDetails) {
-        nextStep = "press_7_prompt";
-        if (parsed.spokenResponse && (
-          (isKannada && /[\u0C80-\u0CFF]/.test(parsed.spokenResponse)) ||
-          (isHindi && /[\u0900-\u097F]/.test(parsed.spokenResponse)) ||
-          (!isKannada && !isHindi)
-        )) {
-          replyText = parsed.spokenResponse;
-        } else {
-          replyText = analysis.suggestedPrompt || (
-            isKannada
-              ? `ತುಂಬು ಹೃದಯದ ಧನ್ಯವಾದಗಳು. ತಮ್ಮ ದೂರನ್ನು ಸಿದ್ಧಪಡಿಸಲಾಗಿದೆ. ತಾವು ಸ್ವತಃ ಧ್ವನಿ ಸಂದೇಶ ರೆಕಾರ್ಡ್ ಮಾಡಲು ಬಯಸಿದರೆ 7 ಒತ್ತಿ, ಅಥವಾ ದೂರನ್ನು ಸಲ್ಲಿಸಲು 9 ಒತ್ತಿ.`
-              : (isHindi 
-                  ? `धन्यवाद। हमने विवरण नोट कर लिया है। यदि आप अपनी आवाज़ में संदेश रिकॉर्ड करना चाहते हैं तो 7 दबाएँ, अथवा शिकायत दर्ज करने के लिए 9 दबाएँ।`
-                  : `Thank you. We have recorded your concern. If you would like to record a voice note, press 7. To submit your complaint, press 9 or say confirm.`)
-          );
-        }
-      } else {
-        nextStep = "collecting_info";
-        if (parsed.spokenResponse && (
-          (isKannada && /[\u0C80-\u0CFF]/.test(parsed.spokenResponse)) ||
-          (isHindi && /[\u0900-\u097F]/.test(parsed.spokenResponse)) ||
-          (!isKannada && !isHindi)
-        )) {
-          replyText = parsed.spokenResponse;
-        } else {
-          replyText = analysis.suggestedPrompt;
-        }
+      nextStep = hasAllDetails ? "press_7_prompt" : "collecting_info";
+
+      let candidateReply = String(parsed.spokenResponse || "").trim();
+      const langMatches = !!candidateReply && (
+        (isKannada && /[\u0C80-\u0CFF]/.test(candidateReply)) ||
+        (isHindi && /[\u0900-\u097F]/.test(candidateReply)) ||
+        (!isKannada && !isHindi)
+      );
+      // Only a real model answer may be learned into the Q&A cache - never a
+      // canned fallback line, or the cache poisons itself over time.
+      let answerCameFromModel = !!candidateReply && langMatches;
+
+      if (!candidateReply || !langMatches) {
+        // Fallback wording must fit the kind of turn it is: for a question we
+        // never fall back to "please tell me the date of the incident".
+        const infoFallback = isKannada
+          ? `ಖಂಡಿತ, ನಾನು ಸಹಾಯ ಮಾಡುತ್ತೇನೆ. ದಯವಿಟ್ಟು ಅದನ್ನು ಇನ್ನೊಮ್ಮೆ ತಿಳಿಸುವಿರಾ?`
+          : isHindi
+          ? `जी, मैं इसमें आपकी सहायता करता हूँ। कृपया इसे एक बार फिर बताइए।`
+          : `Of course, I am happy to help with that. Could you say that once more?`;
+
+        const doneFallback = isKannada
+          ? `ಧನ್ಯವಾದಗಳು, ವಿವರಗಳನ್ನು ದಾಖಲಿಸಿದ್ದೇನೆ. ಧ್ವನಿ ಸಂದೇಶ ರೆಕಾರ್ಡ್ ಮಾಡಲು 7 ಒತ್ತಿ, ದೂರು ಸಲ್ಲಿಸಲು 9 ಒತ್ತಿ.`
+          : isHindi
+          ? `धन्यवाद, मैंने विवरण दर्ज कर लिया है। ऑडियो संदेश के लिए 7 दबाएँ, शिकायत दर्ज करने के लिए 9 दबाएँ।`
+          : `Thank you, I have noted the details. Press 7 to record a voice note, or press 9 to submit your complaint.`;
+
+        const moreFallback = isKannada
+          ? `ದಯವಿಟ್ಟು ಸ್ವಲ್ಪ ಹೆಚ್ಚು ವಿವರ ತಿಳಿಸುವಿರಾ?`
+          : isHindi
+          ? `कृपया थोड़ा और विवरण बताइए।`
+          : `Could you tell me a little more about that?`;
+
+        const kbAnswer = isInformational ? answerFromKnowledgeContext(knowledge, currentLang) : "";
+
+        candidateReply = isInformational
+          ? (kbAnswer || infoFallback)
+          : (analysis.suggestedPrompt || (hasAllDetails ? doneFallback : moreFallback));
+
+        answerCameFromModel = false;
+      }
+
+      replyText = candidateReply;
+
+      // 4c. Learn from real questions so the same one is instant next time.
+      if (answerCameFromModel && isInformational && replyText && saidText.length > 6) {
+        await rememberQaPair({ langCode: currentLang, question: saidText, answer: replyText });
       }
     }
 
-    // Generate high-fidelity TTS audio via Sarvam AI
-    const audioUrl = await generateTTSAudioUrl(replyText, currentLang);
+    // One single place guarantees the agent never re-greets or chants the
+    // caller's name on every turn, whichever branch produced the reply.
+    if (replyText) {
+      replyText = sanitizeIvrReply(replyText, { turnIndex: callerTurn, name: profile?.name });
+    }
+
+    // Persist the conversation. This is the database memory that lets the IVR
+    // behave like someone who knows the caller, and lets any follow-up be
+    // answered from real records instead of a fresh conversation.
+    const turnBase = (Number(turnIndex) || 0) * 2;
+    const userTurnText = String(message || (digits ? `Pressed ${digits}` : "") || "").trim();
+    if (userTurnText) {
+      await logIvrTurn({
+        callId,
+        turnIndex: turnBase,
+        role: "user",
+        text: userTurnText,
+        langCode: currentLang,
+        step,
+      });
+    }
+    if (replyText) {
+      await logIvrTurn({
+        callId,
+        turnIndex: turnBase + 1,
+        role: "assistant",
+        text: replyText,
+        langCode: currentLang,
+        step: nextStep,
+      });
+    }
+    await upsertIvrCall({
+      callId,
+      profile,
+      language: currentLang,
+      status: isComplaintReady ? "submitted" : "active",
+      turnCount: Number(turnIndex) || 0,
+      complaintId: raisedComplaintId,
+      collectedData: updatedData,
+    });
+
+    // Text-to-speech with a hard cap, so a slow voice provider can never delay
+    // the spoken answer. If it misses the deadline the client speaks locally.
+    let audioUrl: string | null = null;
+    try {
+      audioUrl = await Promise.race<string | null>([
+        generateTTSAudioUrl(replyText, currentLang),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5500)),
+      ]);
+    } catch {
+      audioUrl = null;
+    }
 
     res.json({
       text: replyText,
-      replyText: replyText,
+      replyText,
       audioUrl,
       nextStep,
       language: currentLang,
@@ -1464,6 +2078,74 @@ Respond in strict JSON:
   }
 });
 
+// API: Register an IVR call session, so every conversation is stored in the DB
+app.post("/api/ivr/call/start", async (req, res) => {
+  try {
+    const { callId, profile, language } = req.body || {};
+    if (!callId) return res.status(400).json({ ok: false, error: "callId is required" });
+    await upsertIvrCall({ callId, profile, language, status: "active" });
+    res.json({ ok: true, callId });
+  } catch (err: any) {
+    res.status(200).json({ ok: false, error: err?.message });
+  }
+});
+
+// API: Close an IVR call session and store the full transcript
+app.post("/api/ivr/call/end", async (req, res) => {
+  try {
+    const { callId, language, collectedData, history } = req.body || {};
+    const turns: any[] = Array.isArray(history) ? history : [];
+    const transcript = turns
+      .map((h: any) => `${h.role === "user" ? "Caller" : "Agent"}: ${String(h.text || "").trim()}`)
+      .filter((line: string) => line.length > 9)
+      .join("\n");
+
+    await upsertIvrCall({
+      callId,
+      language,
+      status: "completed",
+      transcript,
+      collectedData,
+      turnCount: turns.filter((h: any) => h.role === "user").length,
+      ended: true,
+    });
+    res.json({ ok: true });
+  } catch (err: any) {
+    res.status(200).json({ ok: false, error: err?.message });
+  }
+});
+
+// API: IVR conversation records for the dashboard / admin review
+app.get("/api/admin/ivr-calls", async (req, res) => {
+  try {
+    const turso = getTurso();
+    if (!turso) return res.json([]);
+    const calls = await turso.execute("SELECT * FROM ivr_calls ORDER BY startedAt DESC LIMIT 100");
+    res.json(calls.rows);
+  } catch (error: any) {
+    console.error("Error fetching IVR calls:", error);
+    res.status(500).json({ error: error.message, rows: [] });
+  }
+});
+
+app.get("/api/admin/ivr-calls/:id", async (req, res) => {
+  try {
+    const turso = getTurso();
+    if (!turso) return res.status(404).json({ error: "Database not configured" });
+    const call = await turso.execute({
+      sql: "SELECT * FROM ivr_calls WHERE id = ? LIMIT 1",
+      args: [req.params.id],
+    });
+    const turns = await turso.execute({
+      sql: "SELECT * FROM ivr_turns WHERE callId = ? ORDER BY turnIndex ASC",
+      args: [req.params.id],
+    });
+    res.json({ call: call.rows[0] || null, turns: turns.rows });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // API: Sarvam AI Text-to-Speech (TTS)
 app.post("/api/tts", async (req, res) => {
   try {
@@ -1471,11 +2153,11 @@ app.post("/api/tts", async (req, res) => {
     if (!text || !text.trim()) {
       return res.status(400).json({ error: "Text is required" });
     }
-    const audioUrl = await generateSarvamTTS(text, language);
+    const audioUrl = await generateTTSAudioUrl(text, language);
     if (audioUrl) {
       return res.json({ audioUrl });
     }
-    return res.status(503).json({ error: "Sarvam AI TTS not available" });
+    return res.status(503).json({ error: "No TTS provider available" });
   } catch (err: any) {
     res.status(500).json({ error: err?.message || "TTS failed" });
   }
@@ -1516,51 +2198,61 @@ function isHallucinatedTranscript(text: string): boolean {
 
 // API: Robust Multi-Tier Speech-to-Text (STT) - Sarvam AI + Groq Whisper + OpenAI
 app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
+  const startedAt = Date.now();
   try {
     if (!req.file) {
       return res.status(400).json({ error: "No audio file provided" });
     }
 
-    const { language } = req.body;
-    const groqKey = process.env.GROQ_API_KEY || "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";
+    const rawLang = String(req.body?.language || "en-IN");
+    const hint = String(req.body?.hint || "").slice(0, 400);
+    const langCode = normalizeIvrLang(rawLang); // kn-IN | hi-IN | en-IN
+    const whisperCode = langCode === "kn-IN" ? "kn" : langCode === "hi-IN" ? "hi" : "en";
 
+    const audioBuffer = req.file.buffer as Buffer;
+    const mime = req.file.mimetype || "audio/webm";
+
+    const makeFile = (buffer: Buffer, type: string, name: string) =>
+      typeof File !== "undefined"
+        ? new File([buffer], name, { type })
+        : new Blob([buffer], { type });
+
+    // PRIMARY: Groq Whisper large-v3-turbo. It genuinely understands Kannada,
+    // Hindi and English, and the language is FORCED here - so the transcript can
+    // never silently drift to English the way the browser engine did.
+    const groqKey = (process.env.GROQ_API_KEY || "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").replace(/["'\r\n ]/g, "").trim();
     if (groqKey && groqKey !== "YOUR_GROQ_API_KEY") {
       try {
         const formData = new FormData();
-        const audioBuffer = req.file.buffer;
-        const mime = req.file.mimetype || "audio/webm";
-
-        const fileObj = typeof File !== "undefined"
-          ? new File([audioBuffer], "voice.webm", { type: mime })
-          : new Blob([audioBuffer], { type: mime });
-
-        formData.append("file", fileObj as any, "voice.webm");
+        formData.append("file", makeFile(audioBuffer, mime, "voice.webm") as any, "voice.webm");
         formData.append("model", "whisper-large-v3-turbo");
+        formData.append("language", whisperCode);
+        formData.append("temperature", "0");
+        formData.append("response_format", "json");
+        // Hint biases the decoder towards IVR vocabulary such as "ನಮಸ್ಕಾರ"
+        // (namaskara) and local outlet names, instead of guessing plain English.
+        if (hint) formData.append("prompt", hint);
 
-        if (language === "Hindi" || language === "hi-IN") {
-          formData.append("language", "hi");
-        } else if (language === "Kannada" || language === "kn-IN") {
-          formData.append("language", "kn");
-        } else {
-          formData.append("language", "en");
-        }
-
-        const groqRes = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+        const groqRes = await fetchWithTimeout("https://api.groq.com/openai/v1/audio/transcriptions", {
           method: "POST",
           headers: {
             "Authorization": `Bearer ${groqKey}`,
           },
           body: formData,
-        });
+        }, 12000);
 
         const contentType = groqRes.headers.get("content-type") || "";
         if (contentType.includes("application/json")) {
           const groqData: any = await groqRes.json();
-          const text = groqData?.text?.trim();
-
+          const text = String(groqData?.text || "").trim();
           if (text && !isHallucinatedTranscript(text)) {
-            console.log(`[STT Success] Groq Whisper transcribed (${language || 'en'}): "${text}"`);
-            return res.json({ transcript: text, provider: "groq-whisper" });
+            console.log(`[STT] groq-whisper (${whisperCode}) in ${Date.now() - startedAt}ms: "${text}"`);
+            return res.json({
+              transcript: text,
+              provider: "groq-whisper",
+              language: langCode,
+              ms: Date.now() - startedAt,
+            });
           }
         }
       } catch (groqWhisperErr: any) {
@@ -1568,37 +2260,43 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
       }
     }
 
-    // Sarvam AI STT Fallback
+    // FALLBACK: Sarvam AI. It only accepts real 16 kHz mono WAV, so the webm
+    // recording is converted first (sending webm straight in silently failed).
     const sarvamKey = (process.env.SARVAM_API_KEY || "sk_0l4vlm3x_DFA9ROZg56RLZl9Y83gkHKfW").replace(/["'\r\n ]/g, "").trim();
     if (sarvamKey) {
       try {
-        const sForm = new FormData();
-        const audioBuffer = req.file.buffer;
-        const mime = req.file.mimetype || "audio/webm";
-        const fileObj = typeof File !== "undefined"
-          ? new File([audioBuffer], "voice.webm", { type: mime })
-          : new Blob([audioBuffer], { type: mime });
+        let wavBuffer: Buffer = audioBuffer;
+        try {
+          wavBuffer = await convertWebmToWav(audioBuffer);
+        } catch (convErr: any) {
+          console.warn("WebM->WAV conversion notice:", convErr?.message);
+        }
 
-        sForm.append("file", fileObj as any, "voice.webm");
-        let langCode = "kn-IN";
-        if (language === "Hindi" || language === "hi-IN") langCode = "hi-IN";
-        else if (language === "English" || language === "en-IN") langCode = "en-IN";
+        const sForm = new FormData();
+        const usingWav = wavBuffer !== audioBuffer;
+        sForm.append("file", makeFile(wavBuffer, usingWav ? "audio/wav" : mime, usingWav ? "voice.wav" : "voice.webm") as any, usingWav ? "voice.wav" : "voice.webm");
         sForm.append("language_code", langCode);
         sForm.append("model", "saarika:v2");
 
-        const sRes = await fetch("https://api.sarvam.ai/speech-to-text", {
+        const sRes = await fetchWithTimeout("https://api.sarvam.ai/speech-to-text", {
           method: "POST",
           headers: {
-            "api-subscription-key": sarvamKey
+            "api-subscription-key": sarvamKey,
           },
-          body: sForm
-        });
+          body: sForm,
+        }, 12000);
 
         if (sRes.ok) {
           const sData: any = await sRes.json();
-          if (sData && sData.transcript && sData.transcript.trim()) {
-            console.log(`[STT Success] Sarvam AI transcribed (${language || 'kn-IN'}): "${sData.transcript.trim()}"`);
-            return res.json({ transcript: sData.transcript.trim(), provider: "sarvam-stt" });
+          const text = String(sData?.transcript || "").trim();
+          if (text && !isHallucinatedTranscript(text)) {
+            console.log(`[STT] sarvam (${langCode}) in ${Date.now() - startedAt}ms: "${text}"`);
+            return res.json({
+              transcript: text,
+              provider: "sarvam-stt",
+              language: langCode,
+              ms: Date.now() - startedAt,
+            });
           }
         }
       } catch (sarvamSttErr: any) {
@@ -1606,7 +2304,8 @@ app.post("/api/stt", upload.single("audio"), async (req: any, res) => {
       }
     }
 
-    res.status(200).json({ transcript: "", error: "Could not transcribe audio." });
+    console.warn(`[STT] no transcript from any provider after ${Date.now() - startedAt}ms`);
+    res.status(200).json({ transcript: "", language: langCode, error: "Could not transcribe audio." });
   } catch (err: any) {
     console.error("STT endpoint error:", err);
     res.status(200).json({ transcript: "", error: err.message });
